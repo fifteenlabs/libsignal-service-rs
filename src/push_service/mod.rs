@@ -23,11 +23,13 @@ mod cdn;
 mod error;
 pub mod linking;
 pub(crate) mod response;
+pub mod storage;
 
 pub use account::*;
 pub use cdn::*;
 pub use error::*;
 pub(crate) use response::{ReqwestExt, SignalServiceResponse};
+pub use storage::StorageServiceCredentials;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProofRequired {

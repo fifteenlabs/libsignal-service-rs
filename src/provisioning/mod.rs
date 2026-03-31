@@ -30,6 +30,7 @@ use crate::utils::BASE64_RELAXED;
 use crate::websocket::registration::DeviceActivationRequest;
 use crate::{
     account_manager::encrypt_device_name,
+    master_key::MasterKey,
     pre_keys::PreKeysStore,
     push_service::{HttpAuth, PushService, ServiceIds},
 };
@@ -144,6 +145,7 @@ pub struct NewDeviceRegistration {
     pub pni_public_key: IdentityKey,
     #[debug(ignore)]
     pub profile_key: ProfileKey,
+    pub master_key: Option<MasterKey>,
 }
 
 pub async fn link_device<
@@ -227,6 +229,11 @@ pub async fn link_device<
         let profile_key = message
             .profile_key
             .ok_or(ProvisioningError::MissingProfileKey)?;
+
+        let master_key = message
+            .master_key
+            .as_deref()
+            .and_then(|b| MasterKey::from_slice(b).ok());
 
         let phone_number = message
             .number
@@ -342,6 +349,7 @@ pub async fn link_device<
                 pni_private_key,
                 pni_public_key,
                 profile_key,
+                master_key,
             },
         ))
         .await
