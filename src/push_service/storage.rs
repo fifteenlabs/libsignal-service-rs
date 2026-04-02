@@ -97,7 +97,7 @@ impl PushService {
         &mut self,
         credentials: &StorageServiceCredentials,
         read_operation: ReadOperation,
-    ) -> Result<Vec<crate::proto::StorageItem>, ServiceError> {
+    ) -> Result<Vec<StorageItem>, ServiceError> {
         self.request(
             Method::PUT,
             Endpoint::storage("/v1/storage/read"),

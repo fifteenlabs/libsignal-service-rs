@@ -58,7 +58,7 @@ pub mod prelude {
             AccessControl, Group, Member, PendingMember, RequestingMember,
             Timer,
         },
-        master_key::{MasterKey, MasterKeyStore, StorageServiceKey},
+        master_key::{MasterKey, StorageServiceKey},
         proto::{
             attachment_pointer::AttachmentIdentifier, sync_message::Contacts,
             AttachmentPointer,

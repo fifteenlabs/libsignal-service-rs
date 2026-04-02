@@ -82,6 +82,8 @@ impl StorageServiceKey {
                 mac.finalize().into_bytes().into()
             },
             Some(ikm) => {
+                // When record_ikm is present the storage key is intentionally not mixed in;
+                // the IKM from the manifest is the sole key material, per Signal's spec.
                 let mut info = Vec::with_capacity(
                     STORAGE_SERVICE_ITEM_KEY_INFO_PREFIX.len() + item_key.len(),
                 );
@@ -89,10 +91,16 @@ impl StorageServiceKey {
                 info.extend_from_slice(STORAGE_SERVICE_ITEM_KEY_INFO_PREFIX);
                 info.extend_from_slice(item_key);
 
+                // Salt is an explicit empty buffer — matches Signal Desktop's
+                // `new Uint8Array(0)`. Using None would default to 32 zero
+                // bytes per RFC 5869, but both are equivalent after HMAC
+                // block-size padding. Some(&[]) is used to mirror the
+                // original intent.
                 let hk = Hkdf::<Sha256>::new(Some(&[]), ikm);
                 let mut okm = [0u8; STORAGE_KEY_DERIVED_LEN];
 
-                hk.expand(&info, &mut okm).unwrap();
+                hk.expand(&info, &mut okm)
+                    .expect("fixed 32-byte OKM never exceeds HKDF limit");
                 okm
             },
         }
@@ -115,24 +123,6 @@ impl From<StorageServiceKey> for Vec<u8> {
     fn from(val: StorageServiceKey) -> Self {
         val.inner.to_vec()
     }
-}
-
-/// Storage trait for handling MasterKey and StorageKey.
-pub trait MasterKeyStore {
-    /// Fetch the master key from the store if it exists.
-    fn fetch_master_key(&self) -> Option<MasterKey>;
-
-    /// Fetch the storage service key from the store if it exists.
-    fn fetch_storage_service_key(&self) -> Option<StorageServiceKey>;
-
-    /// Save (or clear) the master key to the store.
-    fn store_master_key(&self, master_key: Option<&MasterKey>);
-
-    /// Save (or clear) the storage service key to the store.
-    fn store_storage_service_key(
-        &self,
-        storage_key: Option<&StorageServiceKey>,
-    );
 }
 
 mod tests {
@@ -158,5 +148,84 @@ mod tests {
 
         assert_eq!(master_key.inner, master_key_bytes.as_slice());
         assert_eq!(storage_key.inner, storage_key_bytes.as_slice());
+    }
+
+    #[test]
+    fn derive_manifest_key_from_storage_key() {
+        use super::{MasterKey, StorageServiceKey};
+        use base64::prelude::*;
+
+        let master_key = MasterKey::from_slice(
+            &BASE64_STANDARD
+                .decode("9hquLIIZmom8fHF7H8pbUAreawmPLEqli5ceJ94pFkU=")
+                .unwrap(),
+        )
+        .unwrap();
+        let storage_key = StorageServiceKey::from_master_key(&master_key);
+
+        assert_eq!(
+            storage_key.derive_storage_manifest_key(0),
+            BASE64_STANDARD
+                .decode("M0fpTEKQB62ig6kBDRLOSk9ZnfmMaS2g+ti03Q03UoY=")
+                .unwrap()
+                .as_slice()
+        );
+        assert_eq!(
+            storage_key.derive_storage_manifest_key(42),
+            BASE64_STANDARD
+                .decode("L2PQTZZYMap1MYFPO7br34kMm2LFlX6v2KCPhBLh9aU=")
+                .unwrap()
+                .as_slice()
+        );
+    }
+
+    #[test]
+    fn derive_item_key_legacy_path() {
+        use super::{MasterKey, StorageServiceKey};
+        use base64::prelude::*;
+
+        let master_key = MasterKey::from_slice(
+            &BASE64_STANDARD
+                .decode("9hquLIIZmom8fHF7H8pbUAreawmPLEqli5ceJ94pFkU=")
+                .unwrap(),
+        )
+        .unwrap();
+        let storage_key = StorageServiceKey::from_master_key(&master_key);
+        let item_key = [0x01u8; 16];
+
+        // No record_ikm: legacy HMAC-SHA256("Item_" + base64(item_key)) path.
+        assert_eq!(
+            storage_key.derive_storage_item_key(&item_key, None),
+            BASE64_STANDARD
+                .decode("7AkyxF1W+EzFMBe3wK0gP4GVpLqEb9Mo7hb5s9ml8KE=")
+                .unwrap()
+                .as_slice()
+        );
+    }
+
+    #[test]
+    fn derive_item_key_hkdf_path() {
+        use super::{MasterKey, StorageServiceKey};
+        use base64::prelude::*;
+
+        let master_key = MasterKey::from_slice(
+            &BASE64_STANDARD
+                .decode("9hquLIIZmom8fHF7H8pbUAreawmPLEqli5ceJ94pFkU=")
+                .unwrap(),
+        )
+        .unwrap();
+        let storage_key = StorageServiceKey::from_master_key(&master_key);
+        let item_key = [0x01u8; 16];
+        let record_ikm = [0xabu8; 32];
+
+        // With record_ikm: HKDF path. The storage key is intentionally not
+        // mixed in — record_ikm is the sole IKM, per Signal's spec.
+        assert_eq!(
+            storage_key.derive_storage_item_key(&item_key, Some(&record_ikm)),
+            BASE64_STANDARD
+                .decode("SJMjUoN8NSTxbwyozgexEx4Q0E3s2kF26L4yr5ksrxc=")
+                .unwrap()
+                .as_slice()
+        );
     }
 }

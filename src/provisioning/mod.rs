@@ -145,6 +145,7 @@ pub struct NewDeviceRegistration {
     pub pni_public_key: IdentityKey,
     #[debug(ignore)]
     pub profile_key: ProfileKey,
+    #[debug(ignore)]
     pub master_key: Option<MasterKey>,
 }
 
@@ -230,10 +231,19 @@ pub async fn link_device<
             .profile_key
             .ok_or(ProvisioningError::MissingProfileKey)?;
 
-        let master_key = message
-            .master_key
-            .as_deref()
-            .and_then(|b| MasterKey::from_slice(b).ok());
+        let master_key = match message.master_key.as_deref() {
+            None => None,
+            Some(b) => match MasterKey::from_slice(b) {
+                Ok(k) => Some(k),
+                Err(e) => {
+                    tracing::warn!(
+                        "provisioning message contained a master key with invalid length, \
+                         storage service will be unavailable: {e}"
+                    );
+                    None
+                },
+            },
+        };
 
         let phone_number = message
             .number
