@@ -262,6 +262,25 @@ impl<T: rand_core::RngCore> rand_core_06::RngCore for Rng06Shiv<'_, T> {
 
 impl<T: rand_core::CryptoRng> rand_core_06::CryptoRng for Rng06Shiv<'_, T> {}
 
+/// Decrypt an AES-256-GCM blob in Signal's `[iv (12 bytes) | ciphertext+tag]` format.
+///
+/// Used by both profile decryption and storage service decryption — Signal Desktop
+/// uses the same `decryptProfile` function for both.
+pub(crate) fn decrypt_aes256_gcm(
+    key: &[u8; 32],
+    data: &[u8],
+) -> Result<Vec<u8>, ProfileCipherError> {
+    let nonce: [u8; 12] = data
+        .get(..12)
+        .ok_or(ProfileCipherError::EncryptionError)?
+        .try_into()
+        .expect("fixed length nonce");
+    let cipher = Aes256Gcm::new(key.into());
+    cipher
+        .decrypt(&nonce.into(), &data[12..])
+        .map_err(|_| ProfileCipherError::EncryptionError)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
