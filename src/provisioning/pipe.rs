@@ -109,7 +109,8 @@ impl ProvisioningPipe {
                         &BASE64_RELAXED.encode(
                             self.provisioning_cipher.public_key().serialize(),
                         ),
-                    );
+                    )
+                    .append_pair("capabilities", "backup5");
 
                 // acknowledge
                 responder

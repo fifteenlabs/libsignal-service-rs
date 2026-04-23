@@ -28,6 +28,8 @@ use crate::push_service::linking::{
 };
 use crate::utils::BASE64_RELAXED;
 use crate::websocket::registration::DeviceActivationRequest;
+use libsignal_account_keys::BackupKey;
+
 use crate::{
     account_manager::encrypt_device_name,
     master_key::MasterKey,
@@ -147,6 +149,8 @@ pub struct NewDeviceRegistration {
     pub profile_key: ProfileKey,
     #[debug(ignore)]
     pub master_key: Option<MasterKey>,
+    #[debug(ignore)]
+    pub backup_key: Option<BackupKey>,
 }
 
 pub async fn link_device<
@@ -244,6 +248,12 @@ pub async fn link_device<
                 },
             },
         };
+
+        let backup_key = message
+            .ephemeral_backup_key
+            .as_ref()
+            .and_then(|b| b.as_slice().try_into().ok())
+            .map(BackupKey);
 
         let phone_number = message
             .number
@@ -360,6 +370,7 @@ pub async fn link_device<
                 pni_public_key,
                 profile_key,
                 master_key,
+                backup_key,
             },
         ))
         .await

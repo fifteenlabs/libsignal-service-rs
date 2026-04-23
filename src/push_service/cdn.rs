@@ -98,6 +98,52 @@ impl PushService {
         Ok(response_stream)
     }
 
+    pub async fn download_transfer_archive(
+        &mut self,
+        cdn_id: u32,
+        key: &str,
+        range_start: u64,
+    ) -> Result<
+        (impl futures::io::AsyncRead + Send + Unpin, Option<u64>),
+        ServiceError,
+    > {
+        // Signal Desktop uses encodeURIComponent(key) here, which encodes everything
+        // except A-Za-z0-9 and the unreserved chars -_.!~*'(). Transfer archive keys
+        // are URL-safe base64 (A-Za-z0-9-_) so skipping encoding works for now.
+        // TODO: use a proper encodeURIComponent-equivalent for correctness
+        let path = format!("attachments/{key}");
+        let mut builder = self.request(
+            Method::GET,
+            Endpoint::cdn(cdn_id, &path),
+            HttpAuthOverride::Unidentified,
+        )?;
+        if range_start > 0 {
+            builder = builder.header(
+                reqwest::header::RANGE,
+                format!("bytes={range_start}-"),
+            );
+        }
+        let response = builder.send().await?.error_for_status()?;
+        // Fresh download: total = Content-Length.
+        // Resumed download (206): Content-Length is the partial chunk size; total comes from
+        // Content-Range: bytes {start}-{end}/{total}  →  parse the number after '/'.
+        let total_bytes = if range_start == 0 {
+            response.content_length()
+        } else {
+            response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.rsplit('/').next())
+                .and_then(|n| n.parse::<u64>().ok())
+        };
+        let stream = response
+            .bytes_stream()
+            .map_err(io::Error::other)
+            .into_async_read();
+        Ok((stream, total_bytes))
+    }
+
     pub(crate) async fn get_attachment_v4_upload_attributes(
         &mut self,
     ) -> Result<AttachmentUploadForm, ServiceError> {

@@ -84,4 +84,11 @@ pub mod protocol {
     pub use usernames::{Username, UsernameError};
 }
 
+pub use libsignal_account_keys::BackupKey;
+pub use libsignal_message_backup::{
+    frame::{FileReaderFactory, FramesReader},
+    key::MessageBackupKey,
+    parse::VarintDelimitedReader,
+};
+
 pub use zkgroup;
