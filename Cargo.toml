@@ -11,7 +11,10 @@ libsignal-protocol = { git = "https://github.com/signalapp/libsignal", tag = "v0
 libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4" }
 libsignal-net = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4", optional = true }
 libsignal-net-infra = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4", optional = true }
+libsignal-message-backup = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4", optional = true }
+libsignal-account-keys = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4" }
 signal-crypto = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4" }
+percent-encoding = "2"
 zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4" }
 usernames = { git = "https://github.com/signalapp/libsignal", tag = "v0.87.4" }
 
@@ -57,7 +60,8 @@ anyhow = "1.0"
 tokio = { version = "1.0", features = ["macros", "rt"] }
 
 [features]
-default = ["cdsi"]
+default = ["cdsi", "backups"]
+backups = ["dep:libsignal-message-backup"]
 phonenumber = ["dep:phonenumber"]
 cdsi = ["dep:libsignal-net", "dep:libsignal-net-infra"]
 

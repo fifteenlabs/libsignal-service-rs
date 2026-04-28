@@ -4,6 +4,7 @@ use std::{
 };
 
 use futures::TryStreamExt;
+use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
 use reqwest::{
     header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     multipart::Part,
@@ -12,6 +13,19 @@ use reqwest::{
 use serde::Deserialize;
 use tracing::{debug, trace};
 use url::Url;
+
+// Mirrors JavaScript's encodeURIComponent: encode everything except
+// A-Za-z0-9 and the unreserved characters - _ . ! ~ * ' ( )
+const ENCODE_URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'!')
+    .remove(b'~')
+    .remove(b'*')
+    .remove(b'\'')
+    .remove(b'(')
+    .remove(b')');
 
 use crate::{
     configuration::Endpoint, prelude::AttachmentIdentifier,
@@ -65,7 +79,10 @@ impl PushService {
                 format!("attachments/{}", id)
             },
             Some(AttachmentIdentifier::CdnKey(key)) => {
-                format!("attachments/{}", key)
+                format!(
+                    "attachments/{}",
+                    utf8_percent_encode(key, ENCODE_URI_COMPONENT)
+                )
             },
             None => {
                 return Err(ServiceError::InvalidFrame {
@@ -96,6 +113,101 @@ impl PushService {
             .into_async_read();
 
         Ok(response_stream)
+    }
+
+    pub async fn download_transfer_archive(
+        &mut self,
+        cdn_id: u32,
+        key: &str,
+        range_start: u64,
+    ) -> Result<(impl futures::io::AsyncRead + Send + Unpin, u64), ServiceError>
+    {
+        let builder = self.request(
+            Method::GET,
+            Endpoint::cdn(
+                cdn_id,
+                format!(
+                    "attachments/{}",
+                    utf8_percent_encode(key, ENCODE_URI_COMPONENT)
+                ),
+            ),
+            HttpAuthOverride::Unidentified,
+        )?;
+        let builder = if range_start > 0 {
+            builder.header(RANGE, format!("bytes={range_start}-"))
+        } else {
+            builder
+        };
+
+        // error_for_status rejects 4xx/5xx early; the PARTIAL_CONTENT check
+        // below separately validates that a range request received 206, not 200.
+        let response = builder.send().await?.error_for_status()?;
+
+        let total_bytes: u64 = if range_start == 0 {
+            // Fresh start: total size comes from Content-Length.
+            response
+                .headers()
+                .get(CONTENT_LENGTH)
+                .ok_or(ServiceError::InvalidFrame {
+                    reason: "Content-Length header absent",
+                })?
+                .to_str()
+                .map_err(|_| ServiceError::InvalidFrame {
+                    reason: "Content-Length is not valid UTF-8",
+                })?
+                .parse()
+                .map_err(|_| ServiceError::InvalidFrame {
+                    reason: "Content-Length is not a number",
+                })?
+        } else {
+            // Resume: server must return 206 Partial Content, no multipart body,
+            // and a Content-Range: bytes <start>-<end>/<total> from which we read
+            // the total size.
+            if response.status() != StatusCode::PARTIAL_CONTENT {
+                return Err(ServiceError::UnhandledResponseCode {
+                    http_code: response.status().as_u16(),
+                });
+            }
+
+            if response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.contains("multipart"))
+            {
+                return Err(ServiceError::InvalidFrame {
+                    reason:
+                        "multipart response not supported for range requests",
+                });
+            }
+
+            response
+                .headers()
+                .get(CONTENT_RANGE)
+                .ok_or(ServiceError::InvalidFrame {
+                    reason: "Content-Range header absent",
+                })?
+                .to_str()
+                .map_err(|_| ServiceError::InvalidFrame {
+                    reason: "Content-Range is not valid UTF-8",
+                })?
+                .rsplit('/')
+                .next()
+                .ok_or(ServiceError::InvalidFrame {
+                    reason: "Content-Range header invalid",
+                })?
+                .parse()
+                .map_err(|_| ServiceError::InvalidFrame {
+                    reason: "Content-Range total is not a number",
+                })?
+        };
+
+        let stream = response
+            .bytes_stream()
+            .map_err(io::Error::other)
+            .into_async_read();
+
+        Ok((stream, total_bytes))
     }
 
     pub(crate) async fn get_attachment_v4_upload_attributes(

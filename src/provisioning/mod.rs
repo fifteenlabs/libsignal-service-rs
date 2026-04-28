@@ -28,6 +28,8 @@ use crate::push_service::linking::{
 };
 use crate::utils::BASE64_RELAXED;
 use crate::websocket::registration::DeviceActivationRequest;
+use libsignal_account_keys::BackupKey;
+
 use crate::{
     account_manager::encrypt_device_name,
     master_key::MasterKey,
@@ -147,6 +149,8 @@ pub struct NewDeviceRegistration {
     pub profile_key: ProfileKey,
     #[debug(ignore)]
     pub master_key: Option<MasterKey>,
+    #[debug(ignore)]
+    pub backup_key: Option<BackupKey>,
 }
 
 pub async fn link_device<
@@ -239,6 +243,21 @@ pub async fn link_device<
                     tracing::warn!(
                         "provisioning message contained a master key with invalid length, \
                          storage service will be unavailable: {e}"
+                    );
+                    None
+                },
+            },
+        };
+
+        let backup_key = match message.ephemeral_backup_key.as_deref() {
+            None => None,
+            Some(b) => match b.try_into() {
+                Ok(bytes) => Some(BackupKey(bytes)),
+                Err(_) => {
+                    tracing::warn!(
+                        "provisioning message contained a backup key with invalid \
+                         length ({}), backup restore will be unavailable",
+                        b.len()
                     );
                     None
                 },
@@ -360,6 +379,7 @@ pub async fn link_device<
                 pni_public_key,
                 profile_key,
                 master_key,
+                backup_key,
             },
         ))
         .await
