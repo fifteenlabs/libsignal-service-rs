@@ -125,6 +125,7 @@ impl PushService {
     ) -> Result<TransferArchiveResult, ServiceError> {
         use std::time::{Duration, Instant};
         let deadline = Instant::now() + total_timeout;
+
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -132,30 +133,41 @@ impl PushService {
                     reason: "timed out waiting for transfer archive",
                 });
             }
-            let poll_secs =
-                remaining.min(Duration::from_secs(5 * 60)).as_secs();
-            // +15 s HTTP leeway matches Signal Desktop: (requestTimeoutInSecs + 15) * SECOND
+
+            let poll_secs = remaining
+                .min(Duration::from_secs(5 * 60))
+                .as_secs_f64()
+                .round() as u64;
             let http_timeout = Duration::from_secs(poll_secs + 15);
-            let path =
-                format!("/v1/devices/transfer_archive?timeout={poll_secs}");
+
             let response = self
                 .request(
                     Method::GET,
-                    Endpoint::service(&path),
+                    Endpoint::service(format!(
+                        "/v1/devices/transfer_archive?timeout={poll_secs}"
+                    )),
                     HttpAuthOverride::NoOverride,
                 )?
                 .timeout(http_timeout)
                 .send()
                 .await?;
-            if response.status() == StatusCode::NO_CONTENT {
-                continue;
+            match response.status() {
+                StatusCode::OK => {
+                    let bytes = response.bytes().await?;
+                    if bytes.is_empty() {
+                        return Err(ServiceError::InvalidFrame {
+                            reason: "200 response had empty body",
+                        });
+                    }
+                    return serde_json::from_slice(&bytes).map_err(Into::into);
+                },
+                StatusCode::NO_CONTENT => continue,
+                code => {
+                    return Err(ServiceError::UnhandledResponseCode {
+                        http_code: code.as_u16(),
+                    });
+                },
             }
-            return response
-                .service_error_for_status()
-                .await?
-                .json()
-                .await
-                .map_err(Into::into);
         }
     }
 }
