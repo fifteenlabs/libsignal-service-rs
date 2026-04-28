@@ -139,6 +139,8 @@ impl PushService {
             builder
         };
 
+        // error_for_status rejects 4xx/5xx early; the PARTIAL_CONTENT check
+        // below separately validates that a range request received 206, not 200.
         let response = builder.send().await?.error_for_status()?;
 
         let total_bytes: u64 = if range_start == 0 {

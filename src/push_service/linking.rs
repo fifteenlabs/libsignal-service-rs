@@ -39,6 +39,7 @@ pub struct LinkCapabilities {
     /// Required for all devices; the server returns 409 if a linking device omits this capability
     /// while the account already has it on any existing device.
     pub spqr: bool,
+    /// Signal Backups v2 support. Fifteen always enables this capability.
     pub backup5: bool,
 }
 

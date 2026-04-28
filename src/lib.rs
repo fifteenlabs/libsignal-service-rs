@@ -86,10 +86,16 @@ pub mod protocol {
 }
 
 pub use libsignal_account_keys::BackupKey;
-pub use libsignal_message_backup::{
-    frame::{FileReaderFactory, FramesReader},
-    key::MessageBackupKey,
-    parse::VarintDelimitedReader,
-};
+
+/// Frame-reading and key types for Signal Backups v2.
+/// Requires the `backups` feature (enabled by default).
+#[cfg(feature = "backups")]
+pub mod backup {
+    pub use libsignal_message_backup::{
+        frame::{FileReaderFactory, FramesReader},
+        key::MessageBackupKey,
+        parse::VarintDelimitedReader,
+    };
+}
 
 pub use zkgroup;
