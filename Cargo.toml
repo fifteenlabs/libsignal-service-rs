@@ -15,7 +15,9 @@ libsignal-core = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.
 libsignal-account-keys = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4" }
 libsignal-net = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4", optional = true }
 libsignal-net-infra = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4", optional = true }
+libsignal-message-backup = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4", optional = true }
 signal-crypto = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4" }
+percent-encoding = "2"
 zkgroup = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4" }
 usernames = { git = "https://github.com/signalapp/libsignal", tag = "v0.94.4" }
 
@@ -72,7 +74,8 @@ clap = { version = "4.4", features = ["derive"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
-default = ["cdsi"]
+default = ["cdsi", "backups"]
+backups = ["dep:libsignal-message-backup"]
 phonenumber = ["dep:phonenumber"]
 cdsi = ["dep:libsignal-net", "dep:libsignal-net-infra"]
 

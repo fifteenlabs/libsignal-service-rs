@@ -32,6 +32,8 @@ use crate::push_service::linking::{
 };
 use crate::utils::BASE64_RELAXED;
 use crate::websocket::registration::DeviceActivationRequest;
+use libsignal_account_keys::BackupKey;
+
 use crate::{
     account_manager::encrypt_device_name,
     pre_keys::PreKeysStore,
@@ -172,6 +174,11 @@ pub struct NewDeviceRegistration {
     /// it should be preferred over the deprecated `master_key` field.
     #[debug(ignore)]
     pub account_entropy_pool: Option<AccountEntropyPool>,
+    /// Ephemeral backup key from the Link & Sync provisioning handshake
+    /// (`ephemeral_backup_key`), used to decrypt the transfer archive
+    /// during message-history import.
+    #[debug(ignore)]
+    pub backup_key: Option<BackupKey>,
 }
 
 pub async fn link_device<
@@ -264,6 +271,21 @@ pub async fn link_device<
             .account_entropy_pool
             .map(|s| s.parse())
             .transpose()?;
+
+        let backup_key = match message.ephemeral_backup_key.as_deref() {
+            None => None,
+            Some(b) => match b.try_into() {
+                Ok(bytes) => Some(BackupKey(bytes)),
+                Err(_) => {
+                    tracing::warn!(
+                        "provisioning message contained a backup key with invalid \
+                         length ({}), backup restore will be unavailable",
+                        b.len()
+                    );
+                    None
+                },
+            },
+        };
 
         let phone_number = message
             .number
@@ -381,6 +403,7 @@ pub async fn link_device<
                 profile_key,
                 master_key,
                 account_entropy_pool,
+                backup_key,
             },
         ))
         .await
