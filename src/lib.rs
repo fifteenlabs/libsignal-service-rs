@@ -67,6 +67,7 @@ pub mod prelude {
         receiver::MessageReceiver,
         sender::{MessageSender, MessageSenderError},
         session_store::SessionStoreExt,
+        BackupKey,
     };
     #[cfg(feature = "phonenumber")]
     pub use phonenumber;

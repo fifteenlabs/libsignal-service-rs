@@ -249,11 +249,20 @@ pub async fn link_device<
             },
         };
 
-        let backup_key = message
-            .ephemeral_backup_key
-            .as_ref()
-            .and_then(|b| b.as_slice().try_into().ok())
-            .map(BackupKey);
+        let backup_key = match message.ephemeral_backup_key.as_deref() {
+            None => None,
+            Some(b) => match b.try_into() {
+                Ok(bytes) => Some(BackupKey(bytes)),
+                Err(_) => {
+                    tracing::warn!(
+                        "provisioning message contained a backup key with invalid \
+                         length ({}), backup restore will be unavailable",
+                        b.len()
+                    );
+                    None
+                },
+            },
+        };
 
         let phone_number = message
             .number

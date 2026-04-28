@@ -79,7 +79,10 @@ impl PushService {
                 format!("attachments/{}", id)
             },
             Some(AttachmentIdentifier::CdnKey(key)) => {
-                format!("attachments/{}", key)
+                format!(
+                    "attachments/{}",
+                    utf8_percent_encode(key, ENCODE_URI_COMPONENT)
+                )
             },
             None => {
                 return Err(ServiceError::InvalidFrame {
