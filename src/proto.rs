@@ -6,6 +6,17 @@ use reqwest::StatusCode;
 include!(concat!(env!("OUT_DIR"), "/signalservice.rs"));
 include!(concat!(env!("OUT_DIR"), "/signal.rs"));
 
+pub mod backup {
+    include!(concat!(env!("OUT_DIR"), "/signal.backup.rs"));
+
+    impl Frame {
+        pub fn decode_bytes(buf: &[u8]) -> Result<Self, ::prost::DecodeError> {
+            use ::prost::Message;
+            Self::decode(buf)
+        }
+    }
+}
+
 impl WebSocketRequestMessage {
     /// Equivalent of
     /// `SignalServiceMessagePipe::isSignalServiceEnvelope(WebSocketMessage)`.

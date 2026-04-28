@@ -31,6 +31,8 @@ use crate::push_service::linking::{
 };
 use crate::utils::BASE64_RELAXED;
 use crate::websocket::registration::DeviceActivationRequest;
+use libsignal_account_keys::BackupKey;
+
 use crate::{
     account_manager::encrypt_device_name,
     pre_keys::PreKeysStore,
@@ -165,9 +167,11 @@ pub struct NewDeviceRegistration {
     /// it should be preferred over the deprecated `master_key` field.
     #[debug(ignore)]
     pub account_entropy_pool: Option<AccountEntropyPool>,
-    /// One-time key for an initial linked-device message-history transfer.
+    /// One-time key for an initial linked-device message-history transfer,
+    /// from the Link & Sync provisioning handshake. Used to decrypt the
+    /// transfer archive during message-history import.
     #[debug(ignore)]
-    pub ephemeral_backup_key: Option<[u8; 32]>,
+    pub ephemeral_backup_key: Option<BackupKey>,
 }
 
 pub async fn link_device<
@@ -259,14 +263,23 @@ pub async fn link_device<
             .account_entropy_pool
             .map(|s| s.parse())
             .transpose()?;
-        let ephemeral_backup_key = message
-            .ephemeral_backup_key
-            .map(|key| {
-                key.try_into().map_err(|key: Vec<u8>| {
-                    ProvisioningError::InvalidEphemeralBackupKey(key.len())
-                })
-            })
-            .transpose()?;
+        // A malformed key only costs the history transfer, so it warns rather
+        // than failing the whole link.
+        let ephemeral_backup_key = match message.ephemeral_backup_key.as_deref()
+        {
+            None => None,
+            Some(b) => match b.try_into() {
+                Ok(bytes) => Some(BackupKey(bytes)),
+                Err(_) => {
+                    tracing::warn!(
+                        "provisioning message contained a backup key with invalid \
+                         length ({}), backup restore will be unavailable",
+                        b.len()
+                    );
+                    None
+                },
+            },
+        };
 
         let phone_number = message
             .number

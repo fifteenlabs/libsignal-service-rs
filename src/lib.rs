@@ -69,6 +69,7 @@ pub mod prelude {
         receiver::MessageReceiver,
         sender::{MessageSender, MessageSenderError},
         session_store::SessionStoreExt,
+        BackupKey,
     };
     #[cfg(feature = "phonenumber")]
     pub use phonenumber;
@@ -87,5 +88,17 @@ pub mod protocol {
 }
 
 pub use libsignal_account_keys;
+pub use libsignal_account_keys::BackupKey;
+
+/// Frame-reading and key types for Signal Backups v2.
+/// Requires the `backups` feature (enabled by default).
+#[cfg(feature = "backups")]
+pub mod backup {
+    pub use libsignal_message_backup::{
+        frame::{FileReaderFactory, FramesReader},
+        key::MessageBackupKey,
+        parse::VarintDelimitedReader,
+    };
+}
 
 pub use zkgroup;
