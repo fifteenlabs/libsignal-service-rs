@@ -42,6 +42,35 @@ type RequestStreamItem = (
     oneshot::Sender<WebSocketResponseMessage>,
 );
 
+/// Why the identified websocket worker stopped. Mirrors libsignal-net's
+/// close-reason vocabulary (see `rust/net/src/env.rs` close codes) so consumers
+/// can classify drops richly instead of treating every close as identical.
+#[derive(Debug, Clone)]
+pub enum DisconnectReason {
+    /// Server closed with 4409 — another device connected with our credentials.
+    ConnectedElsewhere,
+    /// Server closed with 4401 — this connection's credentials were invalidated.
+    ConnectionInvalidated,
+    /// Client closed the socket after keepalives went unanswered.
+    KeepaliveTimeout,
+    /// Server closed with some other code.
+    ServerClosed { code: u16, reason: String },
+    /// Transport-level end / unexpected error (no clean close frame).
+    Transport,
+}
+
+impl DisconnectReason {
+    fn from_close(code: u16, reason: String) -> Self {
+        // 4401/4409 match `rust/net/src/env.rs` CONNECTION_INVALIDATED_CLOSE_CODE /
+        // CONNECTED_ELSEWHERE_CLOSE_CODE in the official libsignal-net.
+        match code {
+            4409 => Self::ConnectedElsewhere,
+            4401 => Self::ConnectionInvalidated,
+            _ => Self::ServerClosed { code, reason },
+        }
+    }
+}
+
 pub struct SignalRequestStream {
     inner: mpsc::UnboundedReceiver<RequestStreamItem>,
 }
@@ -89,6 +118,9 @@ pub struct SignalWebSocket<C: WebSocketType> {
 
 struct SignalWebSocketInner {
     stream: Option<SignalRequestStream>,
+    /// Filled by the worker on the terminal path; drained once by `MessagePipe`
+    /// after the request stream ends, to surface a typed disconnect reason.
+    disconnect_reason: Option<oneshot::Receiver<DisconnectReason>>,
 }
 
 struct SignalWebSocketProcess {
@@ -115,6 +147,18 @@ struct SignalWebSocketProcess {
     >,
 
     ws: WebSocket,
+
+    /// Sends the typed disconnect reason once, on the terminal path, before the
+    /// worker exits (and its `request_sink` drops, ending the request stream).
+    disconnect_reason: Option<oneshot::Sender<DisconnectReason>>,
+}
+
+impl SignalWebSocketProcess {
+    fn set_disconnect_reason(&mut self, reason: DisconnectReason) {
+        if let Some(tx) = self.disconnect_reason.take() {
+            let _ = tx.send(reason);
+        }
+    }
 }
 
 impl SignalWebSocketProcess {
@@ -241,6 +285,8 @@ impl SignalWebSocketProcess {
                     use prost::Message;
                     if !self.outgoing_keep_alive_set.is_empty() {
                         tracing::warn!("Websocket will be closed due to failed keepalives.");
+                        // Record the reason before `close()` consumes `self.ws`.
+                        self.set_disconnect_reason(DisconnectReason::KeepaliveTimeout);
                         if let Err(e) = self.ws.close(reqwest_websocket::CloseCode::Away, None).await {
                             tracing::debug!("Could not close WebSocket: {:?}", e);
                         }
@@ -307,6 +353,10 @@ impl SignalWebSocketProcess {
                     match web_socket_item {
                         Some(Ok(Message::Close { code, reason })) => {
                             tracing::warn!(%code, reason, "websocket closed");
+                            self.set_disconnect_reason(DisconnectReason::from_close(
+                                u16::from(code),
+                                reason.to_string(),
+                            ));
                             break;
                         },
                         Some(Ok(Message::Binary(frame))) => {
@@ -321,8 +371,12 @@ impl SignalWebSocketProcess {
                         Some(Ok(Message::Text(_))) => {
                             tracing::trace!("received text (unsupported, skipping)");
                         }
-                        Some(Err(e)) => return Err(e.into()),
+                        Some(Err(e)) => {
+                            self.set_disconnect_reason(DisconnectReason::Transport);
+                            return Err(e.into());
+                        }
                         None => {
+                            self.set_disconnect_reason(DisconnectReason::Transport);
                             return Err(ServiceError::WsClosing {
                                 reason: "end of web request stream; socket closing"
                             });
@@ -371,6 +425,7 @@ impl<C: WebSocketType> SignalWebSocket<C> {
         let (incoming_request_sink, incoming_request_stream) =
             mpsc::unbounded();
         let (outgoing_request_sink, outgoing_requests) = mpsc::channel(1);
+        let (disconnect_tx, disconnect_rx) = oneshot::channel();
 
         let process = SignalWebSocketProcess {
             keep_alive_path,
@@ -386,6 +441,7 @@ impl<C: WebSocketType> SignalWebSocket<C> {
             .into_iter()
             .collect(),
             ws,
+            disconnect_reason: Some(disconnect_tx),
         };
         let process = process.run().map(|x| match x {
             Ok(()) => (),
@@ -403,6 +459,7 @@ impl<C: WebSocketType> SignalWebSocket<C> {
                     stream: Some(SignalRequestStream {
                         inner: incoming_request_stream,
                     }),
+                    disconnect_reason: Some(disconnect_rx),
                 })),
             },
             process,
@@ -425,6 +482,12 @@ impl<C: WebSocketType> SignalWebSocket<C> {
         &mut self,
     ) -> Option<SignalRequestStream> {
         self.inner_locked().stream.take()
+    }
+
+    pub(crate) fn take_disconnect_reason(
+        &mut self,
+    ) -> Option<oneshot::Receiver<DisconnectReason>> {
+        self.inner_locked().disconnect_reason.take()
     }
 
     pub(crate) fn return_request_stream(&mut self, r: SignalRequestStream) {
@@ -505,5 +568,28 @@ impl WebSocketResponseMessage {
             .as_ref()
             .ok_or(ServiceError::UnsupportedContent)
             .and_then(|b| serde_json::from_slice(b).map_err(Into::into))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DisconnectReason;
+
+    #[test]
+    fn disconnect_reason_from_close_maps_known_codes() {
+        // 4401/4409 mirror libsignal-net's env.rs close codes.
+        assert!(matches!(
+            DisconnectReason::from_close(4409, String::new()),
+            DisconnectReason::ConnectedElsewhere
+        ));
+        assert!(matches!(
+            DisconnectReason::from_close(4401, String::new()),
+            DisconnectReason::ConnectionInvalidated
+        ));
+        // Anything else keeps the raw code/reason for the consumer to inspect.
+        assert!(matches!(
+            DisconnectReason::from_close(1000, "bye".to_owned()),
+            DisconnectReason::ServerClosed { code: 1000, .. }
+        ));
     }
 }

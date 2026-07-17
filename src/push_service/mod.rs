@@ -29,6 +29,27 @@ pub use cdn::*;
 pub use error::*;
 pub(crate) use response::{ReqwestExt, SignalServiceResponse};
 
+/// Map a rejected websocket-upgrade handshake to a typed `ServiceError`.
+///
+/// `into_websocket()` yields `Handshake(UnexpectedStatusCode(status))` on any
+/// non-101 response, so we recover the HTTP status the same way
+/// `service_error_for_status` does for plain requests. Non-handshake errors
+/// (TLS failure, connection refused, …) stay `WsError`.
+fn map_ws_handshake_error(e: reqwest_websocket::Error) -> ServiceError {
+    use reqwest_websocket::{Error, HandshakeError};
+    if let Error::Handshake(HandshakeError::UnexpectedStatusCode(status)) = &e {
+        match status.as_u16() {
+            401 | 403 => return ServiceError::Unauthorized,
+            499 => return ServiceError::AppExpired,
+            429 => {
+                return ServiceError::RateLimitExceeded { retry_after: None }
+            },
+            _ => {},
+        }
+    }
+    ServiceError::WsError(Box::new(e))
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProofRequired {
     pub token: String,
@@ -161,13 +182,21 @@ impl PushService {
                 builder.basic_auth(credentials.login(), credentials.password);
         }
 
-        let ws = builder
+        let ws = match builder
             .upgrade()
             .send()
             .await?
             .into_websocket()
             .instrument(span.clone())
-            .await?;
+            .await
+        {
+            Ok(ws) => ws,
+            // Classify a rejected handshake by status so callers can distinguish
+            // an unlink (401/403) / expired build (499) / rate-limit (429) from a
+            // generic transport failure — mirrors `service_error_for_status` on
+            // the HTTP path, which the websocket-upgrade path otherwise bypasses.
+            Err(e) => return Err(map_ws_handshake_error(e)),
+        };
 
         let unidentified_push_service = PushService {
             servers: self.servers,

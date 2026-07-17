@@ -25,6 +25,10 @@ use crate::{
 pub enum Incoming {
     Envelope(Envelope),
     QueueEmpty,
+    /// Terminal item: the identified websocket closed. Carries the typed reason
+    /// so the consumer can classify the drop (unlink / connected-elsewhere /
+    /// transient) and decide whether to reconnect. Yielded once, last.
+    Disconnected(websocket::DisconnectReason),
 }
 
 pub struct MessagePipe {
@@ -50,6 +54,7 @@ impl MessagePipe {
         let mut stream = ws
             .take_request_stream()
             .expect("web socket request handler not in use");
+        let disconnect_reason = ws.take_disconnect_reason();
 
         while let Some((request, responder)) = stream.next().await {
             // WebsocketConnection::onMessage(ByteString)
@@ -63,6 +68,15 @@ impl MessagePipe {
         }
 
         ws.return_request_stream(stream);
+
+        // The worker exited: surface why as a final stream item so the consumer
+        // can classify the disconnect. Falls back to `Transport` if the worker
+        // ended without recording a reason (e.g. its sender was dropped).
+        if let Some(rx) = disconnect_reason {
+            let reason =
+                rx.await.unwrap_or(websocket::DisconnectReason::Transport);
+            sink.send(Ok(Incoming::Disconnected(reason))).await?;
+        }
 
         Ok(())
     }
