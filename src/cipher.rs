@@ -295,6 +295,7 @@ where
         };
 
         let server_guid = envelope.parse_server_guid();
+        let report_spam_token = envelope.report_spam_token.clone();
 
         let Some(destination_service_id) =
             envelope.parse_destination_service_id()
@@ -565,6 +566,7 @@ where
             unidentified_sender: parts.unidentified_sender,
             was_plaintext: parts.was_plaintext,
             server_guid,
+            report_spam_token,
             pni_verified,
         };
         Ok(Plaintext { metadata, message })
