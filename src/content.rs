@@ -36,6 +36,10 @@ pub struct Metadata {
     ///
     /// The server GUID is used to report spam messages.
     pub server_guid: Option<Uuid>,
+
+    /// Opaque token from the incoming envelope, replayed to the server when
+    /// reporting this message as spam. `None` when the envelope carried none.
+    pub report_spam_token: Option<Vec<u8>>,
 }
 
 impl fmt::Display for Metadata {
