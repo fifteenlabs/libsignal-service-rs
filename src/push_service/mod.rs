@@ -22,6 +22,7 @@ mod account;
 mod cdn;
 mod error;
 pub mod linking;
+mod messages;
 pub(crate) mod response;
 
 pub use account::*;

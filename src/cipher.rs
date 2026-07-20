@@ -196,6 +196,7 @@ where
         };
 
         let server_guid = envelope.parse_server_guid();
+        let report_spam_token = envelope.report_spam_token.clone();
 
         let Some(destination_service_id) =
             envelope.parse_destination_service_id()
@@ -280,6 +281,7 @@ where
                     was_plaintext: false,
 
                     server_guid,
+                    report_spam_token: report_spam_token.clone(),
                 };
 
                 let mut data = message_decrypt_prekey(
@@ -326,6 +328,7 @@ where
                     was_plaintext: true,
 
                     server_guid,
+                    report_spam_token: report_spam_token.clone(),
                 };
                 // Unsealed envelope wrapping a PlaintextContent.
                 // Should contain a DecryptionErrorMessage.
@@ -359,6 +362,7 @@ where
                     was_plaintext: false,
 
                     server_guid,
+                    report_spam_token: report_spam_token.clone(),
                 };
 
                 let mut data = message_decrypt_signal(
@@ -446,6 +450,7 @@ where
                     was_plaintext: false,
 
                     server_guid,
+                    report_spam_token: report_spam_token.clone(),
                 };
 
                 strip_padding(&mut message)?;
