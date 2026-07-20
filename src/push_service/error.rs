@@ -48,6 +48,8 @@ pub enum ServiceError {
     },
     #[error("Authorization failed")]
     Unauthorized,
+    #[error("App/build expired (HTTP 499)")]
+    AppExpired,
     #[error("Registration lock is set: {0:?}")]
     Locked(RegistrationLockFailure),
 
