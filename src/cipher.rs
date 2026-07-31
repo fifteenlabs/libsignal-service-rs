@@ -23,6 +23,7 @@ use crate::{
     envelope::Envelope,
     push_service::ServiceError,
     sender::OutgoingPushMessage,
+    session_lock::SessionLocks,
     session_store::SessionStoreExt,
     utils::BASE64_RELAXED,
     ServiceIdExt,
@@ -36,6 +37,7 @@ pub struct ServiceCipher<S> {
     protocol_store: S,
     trust_roots: Vec<PublicKey>,
     local_address: ProtocolAddress,
+    session_locks: SessionLocks,
 }
 
 impl<S> fmt::Debug for ServiceCipher<S> {
@@ -73,16 +75,30 @@ impl<S> ServiceCipher<S>
 where
     S: ProtocolStore + SenderKeyStore + SessionStoreExt + Clone,
 {
+    /// `session_locks` must be shared with every other cipher and sender for
+    /// this account — that sharing is what keeps a send and a concurrent
+    /// decrypt off the same session at once. See [`SessionLocks`].
     pub fn new(
         protocol_store: S,
         trust_roots: Vec<PublicKey>,
         local_address: ProtocolAddress,
+        session_locks: SessionLocks,
     ) -> Self {
         Self {
             protocol_store,
             trust_roots,
             local_address,
+            session_locks,
         }
+    }
+
+    /// The session locks this cipher serialises against, so a [`MessageSender`]
+    /// built around it encrypts under the same locks the receive path decrypts
+    /// under.
+    ///
+    /// [`MessageSender`]: crate::sender::MessageSender
+    pub(crate) fn session_locks(&self) -> &SessionLocks {
+        &self.session_locks
     }
 
     /// Opens ("decrypts") an envelope.
@@ -256,13 +272,21 @@ where
         });
 
         use crate::proto::envelope::Type;
+
+        // Decrypting advances the peer's ratchet, so it has to exclude a
+        // concurrent send to that same peer. Cloned rather than borrowed from
+        // `self`, which the decrypt calls below need mutably.
+        let session_locks = self.session_locks.clone();
+
         let plaintext = match envelope.r#type() {
             Type::PrekeyBundle => {
+                let source = envelope
+                    .parse_source_service_id()
+                    .expect("prekey bundle format");
+                let _session_guard = session_locks.lock(&source).await;
                 let sender = get_preferred_protocol_address(
                     &self.protocol_store,
-                    &envelope
-                        .parse_source_service_id()
-                        .expect("prekey bundle format"),
+                    &source,
                     envelope.source_device().try_into()?,
                 )
                 .await?;
@@ -339,11 +363,13 @@ where
                 Plaintext { metadata, data }
             },
             Type::Ciphertext => {
+                let source = envelope
+                    .parse_source_service_id()
+                    .expect("ciphertext envelope format");
+                let _session_guard = session_locks.lock(&source).await;
                 let sender = get_preferred_protocol_address(
                     &self.protocol_store,
-                    &envelope
-                        .parse_source_service_id()
-                        .expect("ciphertext envelope format"),
+                    &source,
                     envelope.source_device().try_into()?,
                 )
                 .await?;
@@ -401,6 +427,10 @@ where
                     Timestamp::from_epoch_millis(envelope.timestamp()),
                     None,
                     self.local_address.clone(),
+                    // Sealed sender hides the sender until the outer layer is
+                    // open, so the session lock is taken inside, once the
+                    // certificate has been validated.
+                    &session_locks,
                     &mut self.protocol_store.clone(),
                     &mut self.protocol_store.clone(),
                     &mut self.protocol_store.clone(),
@@ -670,6 +700,7 @@ impl From<SignalProtocolError> for SealedSenderDecryptionError {
     skip(
         ciphertext,
         trust_roots,
+        session_locks,
         identity_store,
         session_store,
         pre_key_store,
@@ -687,6 +718,7 @@ async fn sealed_sender_decrypt(
     timestamp: Timestamp,
     local_e164: Option<String>,
     local_address: ProtocolAddress,
+    session_locks: &SessionLocks,
     identity_store: &mut dyn IdentityKeyStore,
     session_store: &mut dyn SessionStore,
     pre_key_store: &mut dyn PreKeyStore,
@@ -733,6 +765,25 @@ async fn sealed_sender_decrypt(
         usmc.sender()?.sender_uuid()?.to_string(),
         usmc.sender()?.sender_device_id()?,
     );
+
+    // Everything above reads the sender certificate, not the session; only the
+    // call below advances the ratchet, so this is the first point at which the
+    // peer is known and the last at which the lock is still cheap.
+    let _session_guard = match ServiceId::parse_from_service_id_string(
+        remote_address.name(),
+    ) {
+        Some(sender) => Some(session_locks.lock(&sender).await),
+        // Certificate validation above already parsed this as a UUID, so a
+        // failure here is unreachable; decrypting unlocked is still safer than
+        // refusing a message we can otherwise read.
+        None => {
+            tracing::warn!(
+                "sealed sender address is not a service id; decrypting without \
+                 a session lock"
+            );
+            None
+        },
+    };
 
     sealed_sender_decrypt_with_validated_usmc(
         &usmc,

@@ -455,6 +455,11 @@ where
         }
 
         if end_session {
+            // Outside `try_send_message`, so it needs the peer's lock of its
+            // own — otherwise it can delete a session another task is midway
+            // through ratcheting.
+            let _session_guard =
+                self.cipher.session_locks().lock(recipient).await;
             let n = self.protocol_store.delete_all_sessions(recipient).await?;
             tracing::debug!(
                 "ended {} sessions with {}",
@@ -561,6 +566,16 @@ where
         online: bool,
     ) -> SendMessageResult {
         trace!("trying to send a message");
+
+        // Every session-touching send funnels through here, so this is the one
+        // place that needs the lock: it covers `create_encrypted_messages` and
+        // the mismatched/stale-device session repairs in the retry loop below.
+        // Held across the wire send too, which keeps deliveries to one peer in
+        // order. Sends to *different* peers still overlap — only same-peer work
+        // waits — and no second lock is ever taken while this one is held, so
+        // there is nothing to deadlock against.
+        let _session_guard =
+            self.cipher.session_locks().lock(&recipient).await;
 
         use prost::Message;
 
