@@ -39,7 +39,7 @@ use crate::configuration::Endpoint;
 use crate::master_key::StorageServiceKey;
 use crate::proto::{
     ManifestRecord, ReadOperation, StorageItem, StorageItems, StorageManifest,
-    StorageRecord,
+    StorageRecord, WriteOperation,
 };
 use crate::push_service::protobuf::ProtobufResponseExt;
 use crate::push_service::ReqwestExt;
@@ -60,6 +60,10 @@ pub enum StorageServiceError {
     /// because there's nothing the caller can do differently.
     #[error("invalid storage service blob")]
     Invalid,
+    /// The server rejected the write because our manifest version is stale. Carries
+    /// the server's current manifest so the caller can rebuild on top of it and retry.
+    #[error("storage manifest version conflict")]
+    Conflict(Box<ManifestRecord>),
     #[error("network / service error: {0}")]
     Service(#[from] ServiceError),
 }
@@ -210,6 +214,54 @@ impl StorageService {
             .iter()
             .map(|item| Self::decrypt_item(&self.storage_key, item, record_ikm))
             .collect()
+    }
+
+    /// Write a new manifest together with the items it references.
+    ///
+    /// The manifest must list **every** identifier the account should keep: the server
+    /// treats it as the complete index, so anything omitted is orphaned. A caller that
+    /// does not model every record type must copy the existing identifiers through
+    /// unchanged rather than regenerating them.
+    ///
+    /// Returns [`StorageServiceError::Conflict`] when the server's manifest has moved
+    /// on, carrying its current manifest so the caller can rebuild and retry.
+    pub async fn write_items(
+        &self,
+        manifest: StorageManifest,
+        insert_items: Vec<StorageItem>,
+        delete_keys: Vec<Vec<u8>>,
+    ) -> Result<(), StorageServiceError> {
+        let body = WriteOperation {
+            manifest: Some(manifest),
+            insert_item: insert_items,
+            delete_key: delete_keys,
+            clear_all: false,
+        };
+        let mut buf = Vec::with_capacity(body.encoded_len());
+        body.encode(&mut buf).expect("infallible encode into Vec");
+
+        let response = self
+            .service
+            .request(
+                Method::PUT,
+                Endpoint::storage("/v1/storage/"),
+                HttpAuthOverride::Identified(self.credentials.clone()),
+            )?
+            .header("Content-Type", "application/x-protobuf")
+            .body(buf)
+            .send()
+            .await?;
+
+        // Must precede `service_error_for_status`, which maps CONFLICT to
+        // MismatchedDevices and would try to parse this protobuf body as JSON.
+        if response.status().as_u16() == 409 {
+            let manifest: StorageManifest = response.protobuf().await?;
+            let record = Self::decrypt_manifest(&self.storage_key, &manifest)?;
+            return Err(StorageServiceError::Conflict(Box::new(record)));
+        }
+
+        response.service_error_for_status().await?;
+        Ok(())
     }
 
     // -- crypto ------------------------------------------------------------
