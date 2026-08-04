@@ -976,13 +976,22 @@ impl GroupOperations {
             }
         }
 
-        // Encrypt title, description, timer
+        // Encrypt title, description, timer.
+        //
+        // `encrypt_description` / `encrypt_disappearing_messages_timer` always produce a
+        // blob — for `None` they encrypt the empty string / duration 0 — so they have to be
+        // called conditionally. Emitting either on a create is rejected by the server with
+        // HTTP 400; Signal-Desktop nulls both in `buildGroupProto`, commenting "Can't
+        // create group with these initial fields".
         let encrypted_title = self.encrypt_title(title, rng);
-        let encrypted_description = self.encrypt_description(description, rng);
-        let encrypted_timer = self.encrypt_disappearing_messages_timer(
-            disappearing_messages_timer,
-            rng,
-        );
+        let encrypted_description = description
+            .map(|description| self.encrypt_description(Some(description), rng))
+            .unwrap_or_default();
+        let encrypted_timer = disappearing_messages_timer
+            .map(|timer| {
+                self.encrypt_disappearing_messages_timer(Some(timer), rng)
+            })
+            .unwrap_or_default();
 
         // Convert access control
         let proto_access_control =
