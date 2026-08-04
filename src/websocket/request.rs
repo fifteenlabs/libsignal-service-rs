@@ -91,6 +91,11 @@ impl<C: WebSocketType> WebSocketRequestBuilder<'_, C> {
         self
     }
 
+    pub(crate) fn header(mut self, key: &str, value: impl AsRef<str>) -> Self {
+        self.message_builder = self.message_builder.header(key, value);
+        self
+    }
+
     pub(crate) async fn send_json<B: Serialize>(
         self,
         value: B,
