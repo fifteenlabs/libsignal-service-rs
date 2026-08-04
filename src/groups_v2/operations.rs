@@ -10,7 +10,7 @@ use zkgroup::{
         AnyProfileKeyCredentialPresentation, ExpiringProfileKeyCredential,
         ProfileKey,
     },
-    ServerPublicParams, PRESENTATION_VERSION_3,
+    ServerPublicParams, PRESENTATION_VERSION_4,
 };
 
 use crate::{
@@ -847,20 +847,29 @@ impl GroupOperations {
     ///
     /// # Presentation protocol version for `ExpiringProfileKeyCredentialPresentation` ZK proofs.
     ///
-    /// This is the version number sent as a const generic parameter to
-    /// `create_expiring_profile_key_credential_presentation`. It must match the
-    /// version expected by the Signal server's zkgroup verification logic.
+    /// Must match what the Signal server's zkgroup verification expects, which is whatever
+    /// Signal's own clients emit: `PRESENTATION_VERSION_4` (raw value `3`).
     ///
-    /// - Current default value: `PRESENTATION_VERSION_3` (raw value `2`), which is also
-    ///   the default type parameter for `ExpiringProfileKeyCredentialPresentation`
-    ///   in libsignal's zkgroup API.
-    /// - To check the default, look at libsignal's zkgroup source:
-    ///   `rust/zkgroup/src/api/profiles/profile_key_credential_presentation.rs` —
-    ///   `ExpiringProfileKeyCredentialPresentation<const V: u8 = PRESENTATION_VERSION_3>`.
-    // NOTE: Do NOT automatically bump this to the latest version (e.g.
-    // `PRESENTATION_VERSION_4`) without verifying that the Signal server accepts
-    // it. A mismatched version will cause ZK proof verification to fail and
-    // members will be rejected when joining groups.
+    /// Do not take this from the struct's default type parameter — that is
+    /// `PRESENTATION_VERSION_3`, and it is *not* what ships. libsignal's bridge, which is
+    /// what Signal-Desktop and Android actually call, coerces the result to the
+    /// confusingly-named `ExpiringProfileKeyCredentialPresentationV2` alias
+    /// (`bridge/shared/src/zkgroup.rs`), and that alias is defined as
+    /// `ExpiringProfileKeyCredentialPresentation<PRESENTATION_VERSION_4>`.
+    ///
+    /// Getting this wrong makes the server reject the whole group proto with a bare
+    /// HTTP 400 and no further detail.
+    ///
+    /// That rejection is a server-side policy floor, not a verification failure: zkgroup
+    /// itself still accepts V3. `verify_profile_key_credential_presentation`
+    /// (`zkgroup/src/api/server_params.rs`) routes V3 and V4 to the same verifier, and the
+    /// only difference is a `full_checking` flag that binds `C_y5` in the proof — a
+    /// soundness hardening added upstream in April 2026 ("zkgroup: Bind C_y5 in
+    /// ProfileKeyCredential proof"). The service presumably began requiring it once
+    /// clients had shipped it.
+    ///
+    /// So the floor can rise again. If libsignal's bridge starts emitting a newer version
+    /// byte, expect the same undiagnosable 400 until this follows.
     pub fn create_member_presentation<const V: u8>(
         &self,
         server_public_params: &ServerPublicParams,
@@ -912,7 +921,7 @@ impl GroupOperations {
 
         // Add self as administrator with presentation
         let self_presentation = self
-            .create_member_presentation::<PRESENTATION_VERSION_3>(
+            .create_member_presentation::<PRESENTATION_VERSION_4>(
                 server_public_params,
                 self_credential,
             );
@@ -931,7 +940,7 @@ impl GroupOperations {
             if let Some(credential) = &candidate.credential {
                 // Has credential - add as full member with presentation
                 let presentation = self
-                    .create_member_presentation::<PRESENTATION_VERSION_3>(
+                    .create_member_presentation::<PRESENTATION_VERSION_4>(
                         server_public_params,
                         credential,
                     );
@@ -1021,7 +1030,7 @@ impl GroupOperations {
         server_public_params: &ServerPublicParams,
     ) -> proto::group_change::actions::AddMemberAction {
         let presentation = self
-            .create_member_presentation::<PRESENTATION_VERSION_3>(
+            .create_member_presentation::<PRESENTATION_VERSION_4>(
                 server_public_params,
                 credential,
             );
