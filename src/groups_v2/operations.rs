@@ -375,29 +375,38 @@ impl GroupOperations {
         )
     }
 
+    /// Encrypt a description blob.
+    ///
+    /// There is no "absent" encoding: a blob is always produced, and an empty
+    /// description encrypts to a blob of the empty string. To omit the field, skip
+    /// the call — see [`encrypt_group_with_credentials`](Self::encrypt_group_with_credentials).
     pub fn encrypt_description<R: rand::Rng + rand::CryptoRng>(
         &self,
-        description: Option<&str>,
+        description: &str,
         rng: &mut R,
     ) -> Vec<u8> {
         self.encrypt_blob_content(
             group_attribute_blob::Content::DescriptionText(
-                description.unwrap_or_default().to_string(),
+                description.to_string(),
             ),
             rng,
         )
     }
 
+    /// Encrypt a disappearing messages timer blob.
+    ///
+    /// As with [`encrypt_description`](Self::encrypt_description), there is no
+    /// "absent" encoding — omit the field by skipping the call.
     pub fn encrypt_disappearing_messages_timer<
         R: rand::Rng + rand::CryptoRng,
     >(
         &self,
-        timer: Option<&Timer>,
+        timer: &Timer,
         rng: &mut R,
     ) -> Vec<u8> {
         self.encrypt_blob_content(
             group_attribute_blob::Content::DisappearingMessagesDuration(
-                timer.map(|t| t.duration).unwrap_or(0),
+                timer.duration,
             ),
             rng,
         )
@@ -854,6 +863,22 @@ impl GroupOperations {
     ///
     /// This creates a ZK proof (ExpiringProfileKeyCredentialPresentation) that the
     /// Signal server can verify to validate the member's identity and profile key.
+    ///
+    /// # Presentation protocol version
+    ///
+    /// The presentation must carry `PRESENTATION_VERSION_4` (raw value `3`). A V3
+    /// presentation makes the server reject the whole group proto with a bare HTTP 400
+    /// and no further detail — a server-side policy floor, not a verification failure:
+    /// zkgroup itself routes V3 and V4 to the same verifier, differing only in a
+    /// `full_checking` flag that binds `C_y5` in the proof (a soundness hardening added
+    /// in April 2026, which the service presumably began requiring once clients shipped
+    /// it).
+    ///
+    /// Since libsignal v0.99.0 this is no longer expressible as a mistake:
+    /// `create_expiring_profile_key_credential_presentation` lost its version type
+    /// parameter and always returns `ExpiringProfileKeyCredentialPresentationV2`, which
+    /// is `ExpiringProfileKeyCredentialPresentation<PRESENTATION_VERSION_4>`. If the
+    /// floor ever rises again, expect the same undiagnosable 400 until libsignal follows.
     pub fn create_member_presentation(
         &self,
         server_public_params: &ServerPublicParams,
@@ -916,8 +941,22 @@ impl GroupOperations {
             label_string: vec![],
         });
 
-        // Add other members
+        // Add other members.
+        //
+        // Self is already in `members` as administrator, so skip any candidate that is
+        // also us: two entries for the same ACI is not a group the server will accept, and
+        // callers naturally build the candidate list from a conversation that includes
+        // themselves.
+        let self_aci = self_credential.aci();
         for candidate in member_candidates {
+            if candidate.service_id == ServiceId::from(self_aci) {
+                tracing::debug!(
+                    "skipping self in group member candidates; already added \
+                     as administrator"
+                );
+                continue;
+            }
+
             if let Some(credential) = &candidate.credential {
                 // Has credential - add as full member with presentation
                 let presentation = self.create_member_presentation(
@@ -937,7 +976,6 @@ impl GroupOperations {
                 // No credential - add as pending invite
                 let user_id_ciphertext =
                     self.encrypt_service_id(candidate.service_id)?;
-                let self_aci = self_credential.aci();
                 members_pending_profile_key.push(
                     proto::MemberPendingProfileKey {
                         member: Some(proto::Member {
@@ -956,13 +994,20 @@ impl GroupOperations {
             }
         }
 
-        // Encrypt title, description, timer
+        // Encrypt title, description, timer.
+        //
+        // Description and timer are omitted entirely when unset — an encrypted blob of the
+        // empty string is not the same as an absent field, and emitting either on a create
+        // is rejected by the server with HTTP 400. Signal-Desktop nulls both in
+        // `buildGroupProto`, commenting "Can't create group with these initial fields",
+        // and applies the timer afterwards as a separate group change.
         let encrypted_title = self.encrypt_title(title, rng);
-        let encrypted_description = self.encrypt_description(description, rng);
-        let encrypted_timer = self.encrypt_disappearing_messages_timer(
-            disappearing_messages_timer,
-            rng,
-        );
+        let encrypted_description = description
+            .map(|description| self.encrypt_description(description, rng))
+            .unwrap_or_default();
+        let encrypted_timer = disappearing_messages_timer
+            .map(|timer| self.encrypt_disappearing_messages_timer(timer, rng))
+            .unwrap_or_default();
 
         // Convert access control
         let proto_access_control =
@@ -1107,7 +1152,7 @@ mod tests {
         let mut rng = rand::rng();
 
         let description = "This is a test group description";
-        let encrypted = ops.encrypt_description(Some(description), &mut rng);
+        let encrypted = ops.encrypt_description(description, &mut rng);
         let decrypted = ops.decrypt_description_text(&encrypted);
         assert_eq!(decrypted, Some(description.to_string()));
     }
@@ -1139,7 +1184,7 @@ mod tests {
 
         let timer = Timer { duration: 3600 };
         let encrypted =
-            ops.encrypt_disappearing_messages_timer(Some(&timer), &mut rng);
+            ops.encrypt_disappearing_messages_timer(&timer, &mut rng);
         let decrypted = ops.decrypt_disappearing_messages_timer(&encrypted);
         assert_eq!(decrypted, Some(timer));
     }
