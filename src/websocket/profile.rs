@@ -6,6 +6,7 @@ use zkgroup::profiles::{ProfileKeyCommitment, ProfileKeyVersion};
 
 use crate::{
     content::ServiceError,
+    profile_credential::ProfileCredentialRequest,
     push_service::AvatarWrite,
     utils::{serde_base64, serde_optional_base64, BASE64_RELAXED},
     websocket::{
@@ -116,19 +117,15 @@ impl SignalWebSocket<websocket::Identified> {
 
     /// Fetch our own profile key credential over the authenticated socket, as Signal-Desktop
     /// does for self.
+    ///
+    /// Verify the returned bytes with [`ProfileCredentialRequest::receive`] on the same
+    /// `request`.
     pub async fn retrieve_own_profile_key_credential(
         &mut self,
-        aci: Aci,
-        profile_key: zkgroup::profiles::ProfileKey,
-        request_hex: &str,
+        request: &ProfileCredentialRequest,
     ) -> Result<Vec<u8>, ServiceError> {
-        self.retrieve_profile_key_credential_impl(
-            aci,
-            profile_key,
-            request_hex,
-            None,
-        )
-        .await
+        self.retrieve_profile_key_credential_impl(request, None)
+            .await
     }
 
     /// Writes a profile and returns the avatar URL, if one was provided.
@@ -201,15 +198,14 @@ impl SignalWebSocket<websocket::Identified> {
 ///
 /// Byte-for-byte the URL built by Signal-Desktop's `getProfileUrl` and by libsignal's own
 /// `get_profile_key_credential`.
-fn profile_key_credential_path(
-    aci: Aci,
-    profile_key: zkgroup::profiles::ProfileKey,
-    request_hex: &str,
-) -> String {
+fn profile_key_credential_path(request: &ProfileCredentialRequest) -> String {
+    let aci = request.aci();
+
     // Bind before borrowing: `as_ref` would borrow a temporary.
-    let version = profile_key.get_profile_key_version(aci);
+    let version = request.profile_key().get_profile_key_version(aci);
     let version: &str = version.as_ref();
 
+    let request_hex = request.hex();
     format!(
         "/v1/profile/{}/{version}/{request_hex}?credentialType=expiringProfileKey",
         aci.service_id_string(),
@@ -217,16 +213,14 @@ fn profile_key_credential_path(
 }
 
 impl<C: WebSocketType> SignalWebSocket<C> {
-    /// Shared implementation. The entry points below pair the access key with the correct
+    /// Shared implementation. The two entry points pair the access key with the correct
     /// socket type.
     async fn retrieve_profile_key_credential_impl(
         &mut self,
-        aci: Aci,
-        profile_key: zkgroup::profiles::ProfileKey,
-        request_hex: &str,
+        request: &ProfileCredentialRequest,
         access_key: Option<&[u8]>,
     ) -> Result<Vec<u8>, ServiceError> {
-        let path = profile_key_credential_path(aci, profile_key, request_hex);
+        let path = profile_key_credential_path(request);
 
         let mut builder = self.http_request(Method::GET, path)?;
         if let Some(access_key) = access_key {
@@ -265,20 +259,16 @@ impl SignalWebSocket<websocket::Unidentified> {
     ///
     /// A 401/403 surfaces as [`ServiceError::Unauthorized`] (our profile key is stale) and a
     /// 404 as [`ServiceError::NotFoundError`] (profile version not found).
+    ///
+    /// Verify the returned bytes with [`ProfileCredentialRequest::receive`] on the same
+    /// `request`.
     pub async fn retrieve_profile_key_credential(
         &mut self,
-        aci: Aci,
-        profile_key: zkgroup::profiles::ProfileKey,
-        request_hex: &str,
+        request: &ProfileCredentialRequest,
     ) -> Result<Vec<u8>, ServiceError> {
-        let access_key = profile_key.derive_access_key();
-        self.retrieve_profile_key_credential_impl(
-            aci,
-            profile_key,
-            request_hex,
-            Some(&access_key),
-        )
-        .await
+        let access_key = request.profile_key().derive_access_key();
+        self.retrieve_profile_key_credential_impl(request, Some(&access_key))
+            .await
     }
 
     pub async fn retrieve_profile_avatar(
@@ -304,7 +294,6 @@ mod tests {
     };
 
     use super::*;
-    use crate::profile_credential::ProfileCredentialRequest;
 
     const ACI_UUID: &str = "9d0652a3-dcc3-4d11-975f-74d61598733f";
 
@@ -339,9 +328,6 @@ mod tests {
             profile_key,
         );
 
-        assert_eq!(
-            profile_key_credential_path(aci, profile_key, request.hex()),
-            expected
-        );
+        assert_eq!(profile_key_credential_path(&request), expected);
     }
 }

@@ -938,8 +938,22 @@ impl GroupOperations {
             label_string: vec![],
         });
 
-        // Add other members
+        // Add other members.
+        //
+        // Self is already in `members` as administrator, so skip any candidate that is
+        // also us: two entries for the same ACI is not a group the server will accept, and
+        // callers naturally build the candidate list from a conversation that includes
+        // themselves.
+        let self_aci = self_credential.aci();
         for candidate in member_candidates {
+            if candidate.service_id == ServiceId::from(self_aci) {
+                tracing::debug!(
+                    "skipping self in group member candidates; already added \
+                     as administrator"
+                );
+                continue;
+            }
+
             if let Some(credential) = &candidate.credential {
                 // Has credential - add as full member with presentation
                 let presentation = self.create_member_presentation(
@@ -959,7 +973,6 @@ impl GroupOperations {
                 // No credential - add as pending invite
                 let user_id_ciphertext =
                     self.encrypt_service_id(candidate.service_id)?;
-                let self_aci = self_credential.aci();
                 members_pending_profile_key.push(
                     proto::MemberPendingProfileKey {
                         member: Some(proto::Member {

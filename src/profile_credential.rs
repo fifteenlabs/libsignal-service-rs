@@ -29,11 +29,15 @@ pub enum ProfileCredentialError {
 
 /// A pending profile key credential request.
 ///
-/// Hold on to this across the fetch: [`hex`](Self::hex) goes into the request URL, and
-/// [`receive`](Self::receive) needs the context generated alongside it.
+/// Hold on to this across the fetch: it carries everything the URL is built from and the
+/// context [`receive`](Self::receive) needs to verify the response. The fetch methods take
+/// this whole value rather than its parts, so a request can never be paired with the wrong
+/// ACI or profile key.
 pub struct ProfileCredentialRequest {
     server_public_params: ServerPublicParams,
     context: ProfileKeyCredentialRequestContext,
+    aci: Aci,
+    profile_key: ProfileKey,
     hex: String,
 }
 
@@ -73,6 +77,8 @@ impl ProfileCredentialRequest {
         Self {
             server_public_params: server_public_params.clone(),
             context,
+            aci,
+            profile_key,
             hex,
         }
     }
@@ -80,6 +86,16 @@ impl ProfileCredentialRequest {
     /// The hex-encoded request, to be embedded in the fetch URL.
     pub fn hex(&self) -> &str {
         &self.hex
+    }
+
+    /// The ACI this request was generated for.
+    pub fn aci(&self) -> Aci {
+        self.aci
+    }
+
+    /// The profile key this request was generated for.
+    pub fn profile_key(&self) -> ProfileKey {
+        self.profile_key
     }
 
     /// Verify and unwrap a `credential` response body.
