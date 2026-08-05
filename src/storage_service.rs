@@ -60,10 +60,21 @@ pub enum StorageServiceError {
     /// because there's nothing the caller can do differently.
     #[error("invalid storage service blob")]
     Invalid,
-    /// The server rejected the write because our manifest version is stale. Carries
-    /// the server's current manifest so the caller can rebuild on top of it and retry.
+    /// The server rejected the write because our manifest version was not
+    /// `remote + 1` — another device has written since we last synced.
+    ///
+    /// The attempted write is dead. A conflict means the account state changed, so the
+    /// *content* of the write may no longer be correct, not merely its version: re-sync,
+    /// merge, and rebuild the write from the result. Do not bump the version and retry
+    /// the same body — that silently discards whatever the other device wrote.
+    ///
+    /// The server does return its current manifest in the 409 body, but deliberately
+    /// carries nothing here: the manifest alone cannot be acted on without also fetching
+    /// and merging the records behind it. Signal's clients discard it for the same
+    /// reason — Android marks its cached manifest stale (`localManifestOutOfDate = true`)
+    /// and re-runs `StorageSyncJob`; Desktop backs off and re-runs its sync job.
     #[error("storage manifest version conflict")]
-    Conflict(Box<ManifestRecord>),
+    Conflict,
     #[error("network / service error: {0}")]
     Service(#[from] ServiceError),
 }
@@ -216,27 +227,34 @@ impl StorageService {
             .collect()
     }
 
-    /// Write a new manifest together with the items it references.
+    /// Write a new manifest together with the records it references.
     ///
-    /// The manifest must list **every** identifier the account should keep: the server
-    /// treats it as the complete index, so anything omitted is orphaned. A caller that
-    /// does not model every record type must copy the existing identifiers through
-    /// unchanged rather than regenerating them.
+    /// `manifest.version` must be exactly one greater than the server's; anything else is
+    /// a [`Conflict`](StorageServiceError::Conflict). Sync with
+    /// [`manifest_if_changed`](Self::manifest_if_changed) first, and still handle the
+    /// conflict — another device can write in the gap.
     ///
-    /// Returns [`StorageServiceError::Conflict`] when the server's manifest has moved
-    /// on, carrying its current manifest so the caller can rebuild and retry.
+    /// The manifest must list **every** identifier the account should keep. The server
+    /// treats it as the complete index, so anything omitted is orphaned on every device;
+    /// copy through identifiers you don't model rather than regenerating from local state.
+    ///
+    /// Records are encrypted here so they cannot disagree with `manifest.record_ikm` —
+    /// carry that value forward from the manifest you read.
+    ///
+    /// Empty inserts and deletes still writes, republishing the manifest alone; skip
+    /// pointless writes at the call site.
     pub async fn write_items(
         &self,
-        manifest: StorageManifest,
-        insert_items: Vec<StorageItem>,
+        manifest: ManifestRecord,
+        insert_records: Vec<(Vec<u8>, StorageRecord)>,
         delete_keys: Vec<Vec<u8>>,
     ) -> Result<(), StorageServiceError> {
-        let body = WriteOperation {
-            manifest: Some(manifest),
-            insert_item: insert_items,
-            delete_key: delete_keys,
-            clear_all: false,
-        };
+        let body = Self::write_operation(
+            &self.storage_key,
+            &manifest,
+            insert_records,
+            delete_keys,
+        );
         let mut buf = Vec::with_capacity(body.encoded_len());
         body.encode(&mut buf).expect("infallible encode into Vec");
 
@@ -254,14 +272,47 @@ impl StorageService {
 
         // Must precede `service_error_for_status`, which maps CONFLICT to
         // MismatchedDevices and would try to parse this protobuf body as JSON.
+        //
+        // The status is the whole signal. The body holds the server's current manifest,
+        // but it is deliberately not read: see `StorageServiceError::Conflict`.
         if response.status().as_u16() == 409 {
-            let manifest: StorageManifest = response.protobuf().await?;
-            let record = Self::decrypt_manifest(&self.storage_key, &manifest)?;
-            return Err(StorageServiceError::Conflict(Box::new(record)));
+            return Err(StorageServiceError::Conflict);
         }
 
         response.service_error_for_status().await?;
         Ok(())
+    }
+
+    /// Build the [`WriteOperation`] for [`write_items`](Self::write_items), encrypting the
+    /// manifest and every inserted record here.
+    ///
+    /// Both halves derive from the same `manifest.record_ikm`, which is the point: the
+    /// manifest is the only record of which key the items were encrypted under, so a
+    /// mismatch is unrecoverable — the server can't check it, and every device then fails
+    /// to decrypt those items. Desktop and Android encrypt in one place for this reason.
+    fn write_operation(
+        storage_key: &StorageServiceKey,
+        manifest: &ManifestRecord,
+        insert_records: Vec<(Vec<u8>, StorageRecord)>,
+        delete_keys: Vec<Vec<u8>>,
+    ) -> WriteOperation {
+        // Empty means the legacy per-item derivation, not "no encryption".
+        let record_ikm =
+            Some(manifest.record_ikm.as_slice()).filter(|ikm| !ikm.is_empty());
+
+        let insert_item = insert_records
+            .into_iter()
+            .map(|(raw_id, record)| {
+                Self::encrypt_item(storage_key, raw_id, &record, record_ikm)
+            })
+            .collect();
+
+        WriteOperation {
+            manifest: Some(Self::encrypt_manifest(storage_key, manifest)),
+            insert_item,
+            delete_key: delete_keys,
+            clear_all: false,
+        }
     }
 
     // -- crypto ------------------------------------------------------------
@@ -449,6 +500,66 @@ mod tests {
                 .unwrap(),
             record
         );
+    }
+
+    /// The invariant `write_operation` exists to enforce: items must be readable with the
+    /// ikm their own manifest declares. A mismatch is unrecoverable, so it is pinned here
+    /// rather than left to the caller.
+    #[test]
+    fn items_are_encrypted_with_the_manifest_record_ikm() {
+        let storage_key = StorageServiceKey { inner: [1u8; 32] };
+        let ikm = [9u8; 32];
+        let manifest = ManifestRecord {
+            version: 5,
+            source_device: 1,
+            identifiers: vec![],
+            record_ikm: ikm.to_vec(),
+        };
+
+        let operation = StorageService::write_operation(
+            &storage_key,
+            &manifest,
+            vec![(vec![0xABu8; 16], StorageRecord { record: None })],
+            vec![],
+        );
+
+        let item = &operation.insert_item[0];
+        assert!(
+            StorageService::decrypt_item(&storage_key, item, Some(&ikm))
+                .is_ok(),
+            "item must decrypt under the ikm its manifest declares"
+        );
+        assert!(
+            StorageService::decrypt_item(&storage_key, item, None).is_err(),
+            "and must not have silently used the legacy derivation"
+        );
+    }
+
+    /// With an empty `record_ikm` the legacy derivation is the correct one — the manifest
+    /// still describes its own items.
+    #[test]
+    fn items_use_the_legacy_derivation_when_the_manifest_has_no_ikm() {
+        let storage_key = StorageServiceKey { inner: [2u8; 32] };
+        let manifest = ManifestRecord {
+            version: 1,
+            source_device: 1,
+            identifiers: vec![],
+            record_ikm: vec![],
+        };
+
+        let operation = StorageService::write_operation(
+            &storage_key,
+            &manifest,
+            vec![(vec![0xCDu8; 16], StorageRecord { record: None })],
+            vec![],
+        );
+
+        assert!(StorageService::decrypt_item(
+            &storage_key,
+            &operation.insert_item[0],
+            None
+        )
+        .is_ok());
     }
 
     #[test]
