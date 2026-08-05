@@ -262,6 +262,33 @@ impl<C: CredentialsCache> GroupsManager<C> {
         self.identified_push_service.get_group(authorization).await
     }
 
+    /// Create a group from its fully-encrypted initial state.
+    ///
+    /// The caller derives the master key and builds the `Group` with
+    /// [`GroupOperations::encrypt_group_with_credentials`]; this attaches the zk auth
+    /// credential the server requires and performs the write. Read the group back with
+    /// [`fetch_encrypted_group`](Self::fetch_encrypted_group) to obtain its canonical state.
+    pub async fn create_group<R: Rng + CryptoRng>(
+        &mut self,
+        csprng: &mut R,
+        master_key_bytes: &[u8],
+        group: crate::proto::Group,
+    ) -> Result<(), ServiceError> {
+        let group_master_key = GroupMasterKey::new(
+            master_key_bytes
+                .try_into()
+                .map_err(|_| ServiceError::GroupsV2Error)?,
+        );
+        let group_secret_params =
+            GroupSecretParams::derive_from_master_key(group_master_key);
+        let authorization = self
+            .get_authorization_for_today(csprng, group_secret_params)
+            .await?;
+        self.identified_push_service
+            .create_group(authorization, group)
+            .await
+    }
+
     #[tracing::instrument(
         skip(self, group_secret_params),
         fields(path = %path[..4.min(path.len())]),

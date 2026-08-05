@@ -8,6 +8,7 @@ use crate::{
 };
 
 use libsignal_core::DeviceId;
+use prost::Message;
 use protobuf::ProtobufResponseExt;
 use reqwest::{Method, RequestBuilder};
 use reqwest_websocket::RequestBuilderExt;
@@ -230,6 +231,35 @@ impl PushService {
         .await?
         .protobuf()
         .await
+    }
+
+    /// Create a group.
+    ///
+    /// The encrypted `Group` is the complete initial state; the server assigns nothing
+    /// beyond validating the member presentations. The response body is deliberately
+    /// ignored — its shape differs between the v1 endpoint used here and the `v2/groups`
+    /// one Signal-Desktop creates through, and the caller reads the group back rather than
+    /// depending on it.
+    pub(crate) async fn create_group(
+        &mut self,
+        credentials: HttpAuth,
+        group: crate::proto::Group,
+    ) -> Result<(), ServiceError> {
+        let mut buf = Vec::with_capacity(group.encoded_len());
+        group.encode(&mut buf).expect("infallible encode into Vec");
+
+        self.request(
+            Method::PUT,
+            Endpoint::storage("/v1/groups/"),
+            HttpAuthOverride::Identified(credentials),
+        )?
+        .header("Content-Type", "application/x-protobuf")
+        .body(buf)
+        .send()
+        .await?
+        .service_error_for_status()
+        .await?;
+        Ok(())
     }
 }
 
