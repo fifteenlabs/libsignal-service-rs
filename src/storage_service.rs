@@ -98,6 +98,24 @@ struct StorageAuthResponse {
     password: String,
 }
 
+/// One decrypted storage item: the identifier it lives under, its plaintext,
+/// and the decoded record.
+///
+/// The identifier is carried because a record can only be *changed* by writing
+/// it under a fresh id and deleting the old one, so anything that intends to
+/// update a record has to remember where the current one lives.
+///
+/// The plaintext is carried because prost silently drops fields it does not
+/// model. Re-encoding a decoded [`StorageRecord`] would therefore delete
+/// whatever a newer client wrote — an update has to be built on these bytes,
+/// not on a lossy round-trip.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecryptedItem {
+    pub key: Vec<u8>,
+    pub plaintext: Vec<u8>,
+    pub record: StorageRecord,
+}
+
 /// Authenticated Storage Service handle.
 ///
 /// Wraps a [`PushService`] plus the short-lived basic-auth credentials and
@@ -194,12 +212,13 @@ impl StorageService {
     /// `record_ikm` is [`ManifestRecord::record_ikm`] (empty on legacy
     /// accounts, in which case the per-item key is derived from the storage
     /// key directly). Items the server doesn't return are simply absent from
-    /// the result.
+    /// the result, so match them up by [`DecryptedItem::key`] rather than by
+    /// position.
     pub async fn read_items(
         &self,
         keys: Vec<Vec<u8>>,
         record_ikm: Option<&[u8]>,
-    ) -> Result<Vec<StorageRecord>, StorageServiceError> {
+    ) -> Result<Vec<DecryptedItem>, StorageServiceError> {
         let body = ReadOperation { read_key: keys };
         let mut buf = Vec::with_capacity(body.encoded_len());
         body.encode(&mut buf).expect("infallible encode into Vec");
@@ -243,10 +262,16 @@ impl StorageService {
     ///
     /// Empty inserts and deletes still writes, republishing the manifest alone; skip
     /// pointless writes at the call site.
+    ///
+    /// Records are passed **already encoded**, deliberately. Encoding here would
+    /// mean round-tripping through prost, which drops fields it does not model —
+    /// fatal when republishing a record another client wrote. Callers building a
+    /// fresh record encode it themselves, so that lossy step stays visible at the
+    /// call site; callers editing an existing one pass the bytes they read.
     pub async fn write_items(
         &self,
         manifest: ManifestRecord,
-        insert_records: Vec<(Vec<u8>, StorageRecord)>,
+        insert_records: Vec<(Vec<u8>, Vec<u8>)>,
         delete_keys: Vec<Vec<u8>>,
     ) -> Result<(), StorageServiceError> {
         let body = Self::write_operation(
@@ -293,7 +318,7 @@ impl StorageService {
     fn write_operation(
         storage_key: &StorageServiceKey,
         manifest: &ManifestRecord,
-        insert_records: Vec<(Vec<u8>, StorageRecord)>,
+        insert_records: Vec<(Vec<u8>, Vec<u8>)>,
         delete_keys: Vec<Vec<u8>>,
     ) -> WriteOperation {
         // Empty means the legacy per-item derivation, not "no encryption".
@@ -302,6 +327,7 @@ impl StorageService {
 
         let insert_item = insert_records
             .into_iter()
+            // `record` is already an encoded StorageRecord; see `write_items`.
             .map(|(raw_id, record)| {
                 Self::encrypt_item(storage_key, raw_id, &record, record_ikm)
             })
@@ -344,26 +370,31 @@ impl StorageService {
         storage_key: &StorageServiceKey,
         item: &StorageItem,
         record_ikm: Option<&[u8]>,
-    ) -> Result<StorageRecord, StorageServiceError> {
+    ) -> Result<DecryptedItem, StorageServiceError> {
         let key = Self::item_key(storage_key, &item.key, record_ikm);
         let plaintext = decrypt(&key, &item.value)?;
-        Ok(StorageRecord::decode(&*plaintext)?)
+        Ok(DecryptedItem {
+            key: item.key.clone(),
+            record: StorageRecord::decode(&*plaintext)?,
+            plaintext,
+        })
     }
 
     /// Encrypt a [`StorageRecord`] into a [`StorageItem`] ready to PUT.
     ///
-    /// `raw_id` is the item's identifier; `record_ikm` should match what's
-    /// in the manifest this item will be referenced from.
+    /// `raw_id` is the item's identifier; `record` is an already-encoded
+    /// [`StorageRecord`]; `record_ikm` should match what's in the manifest this
+    /// item will be referenced from.
     pub fn encrypt_item(
         storage_key: &StorageServiceKey,
         raw_id: Vec<u8>,
-        record: &StorageRecord,
+        record: &[u8],
         record_ikm: Option<&[u8]>,
     ) -> StorageItem {
         let key = Self::item_key(storage_key, &raw_id, record_ikm);
         StorageItem {
             key: raw_id,
-            value: encrypt(&key, &record.encode_to_vec()),
+            value: encrypt(&key, record),
         }
     }
 
@@ -474,30 +505,33 @@ mod tests {
         let storage_key = StorageServiceKey { inner: [9u8; 32] };
         let raw_id = vec![0xABu8; 16];
         let record = StorageRecord { record: None };
+        let encoded = record.encode_to_vec();
 
         // Legacy path (no record_ikm).
         let legacy = StorageService::encrypt_item(
             &storage_key,
             raw_id.clone(),
-            &record,
+            &encoded,
             None,
         );
-        assert_eq!(
-            StorageService::decrypt_item(&storage_key, &legacy, None).unwrap(),
-            record
-        );
+        let decrypted =
+            StorageService::decrypt_item(&storage_key, &legacy, None).unwrap();
+        assert_eq!(decrypted.record, record);
+        assert_eq!(decrypted.key, raw_id);
+        assert_eq!(decrypted.plaintext, record.encode_to_vec());
 
         // Modern path (HKDF off a record_ikm).
         let ikm = [4u8; 32];
         let modern = StorageService::encrypt_item(
             &storage_key,
             raw_id.clone(),
-            &record,
+            &encoded,
             Some(&ikm),
         );
         assert_eq!(
             StorageService::decrypt_item(&storage_key, &modern, Some(&ikm))
-                .unwrap(),
+                .unwrap()
+                .record,
             record
         );
     }
@@ -519,7 +553,10 @@ mod tests {
         let operation = StorageService::write_operation(
             &storage_key,
             &manifest,
-            vec![(vec![0xABu8; 16], StorageRecord { record: None })],
+            vec![(
+                vec![0xABu8; 16],
+                StorageRecord { record: None }.encode_to_vec(),
+            )],
             vec![],
         );
 
@@ -550,7 +587,10 @@ mod tests {
         let operation = StorageService::write_operation(
             &storage_key,
             &manifest,
-            vec![(vec![0xCDu8; 16], StorageRecord { record: None })],
+            vec![(
+                vec![0xCDu8; 16],
+                StorageRecord { record: None }.encode_to_vec(),
+            )],
             vec![],
         );
 

@@ -43,7 +43,9 @@ pub use crate::profile_credential::{
     ProfileCredentialError, ProfileCredentialRequest,
 };
 pub use crate::service_address::*;
-pub use crate::storage_service::{StorageService, StorageServiceError};
+pub use crate::storage_service::{
+    DecryptedItem, StorageService, StorageServiceError,
+};
 
 pub const USER_AGENT: &str =
     concat!(env!("CARGO_PKG_NAME"), "-rs-", env!("CARGO_PKG_VERSION"));
