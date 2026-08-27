@@ -14,7 +14,7 @@ use zkgroup::{
 };
 
 use crate::{
-    groups_v2::model::Timer,
+    groups_v2::model::{AccessRequired, Timer},
     proto::{
         self, group_attribute_blob, GroupAttributeBlob,
         Member as EncryptedMember,
@@ -859,6 +859,68 @@ impl GroupOperations {
         )
     }
 
+    pub fn build_modify_title_action<R: rand::Rng + rand::CryptoRng>(
+        &self,
+        title: &str,
+        rng: &mut R,
+    ) -> proto::group_change::actions::ModifyTitleAction {
+        proto::group_change::actions::ModifyTitleAction {
+            title: self.encrypt_title(title, rng),
+        }
+    }
+
+    /// An empty description clears the field: the server keeps the blob, and
+    /// [`decrypt_description_text`](Self::decrypt_description_text) reads an empty
+    /// string back as `None`.
+    pub fn build_modify_description_action<R: rand::Rng + rand::CryptoRng>(
+        &self,
+        description: &str,
+        rng: &mut R,
+    ) -> proto::group_change::actions::ModifyDescriptionAction {
+        proto::group_change::actions::ModifyDescriptionAction {
+            description: self.encrypt_description(description, rng),
+        }
+    }
+
+    /// A zero duration turns the timer off — that is how every Signal client
+    /// encodes "off", and how [`decrypt_disappearing_messages_timer`](Self::decrypt_disappearing_messages_timer)
+    /// reads it back.
+    pub fn build_modify_disappearing_messages_timer_action<
+        R: rand::Rng + rand::CryptoRng,
+    >(
+        &self,
+        timer: &Timer,
+        rng: &mut R,
+    ) -> proto::group_change::actions::ModifyDisappearingMessageTimerAction
+    {
+        proto::group_change::actions::ModifyDisappearingMessageTimerAction {
+            timer: self.encrypt_disappearing_messages_timer(timer, rng),
+        }
+    }
+
+    /// Who may change the group's title, description, avatar and timer. Only
+    /// `Member` and `Administrator` are meaningful here; the other variants belong
+    /// to the invite-link rule.
+    pub fn build_modify_attributes_access_action(
+        &self,
+        access: AccessRequired,
+    ) -> proto::group_change::actions::ModifyAttributesAccessControlAction {
+        proto::group_change::actions::ModifyAttributesAccessControlAction {
+            attributes_access: access.into(),
+        }
+    }
+
+    /// Who may add members. Same domain as
+    /// [`build_modify_attributes_access_action`](Self::build_modify_attributes_access_action).
+    pub fn build_modify_members_access_action(
+        &self,
+        access: AccessRequired,
+    ) -> proto::group_change::actions::ModifyMembersAccessControlAction {
+        proto::group_change::actions::ModifyMembersAccessControlAction {
+            members_access: access.into(),
+        }
+    }
+
     /// Create a presentation from a credential for adding a member to a group.
     ///
     /// This creates a ZK proof (ExpiringProfileKeyCredentialPresentation) that the
@@ -1175,6 +1237,72 @@ mod tests {
             ops.decrypt_member_label_text(&encrypted),
             Some(label.to_string())
         );
+    }
+
+    #[test]
+    fn attribute_actions_decrypt_to_the_changes_they_encode() {
+        use super::super::model::GroupChange;
+
+        let ops = create_group_operations();
+        let mut rng = rand::rng();
+
+        let editor = Aci::parse_from_service_id_string(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .expect("valid ACI");
+        let actions = proto::group_change::Actions {
+            source_user_id: ops.encrypt_aci(editor).unwrap(),
+            group_id: ops.group_secret_params.get_group_identifier().to_vec(),
+            version: 7,
+            modify_title: Some(
+                ops.build_modify_title_action("Renamed", &mut rng),
+            ),
+            modify_description: Some(
+                ops.build_modify_description_action("About us", &mut rng),
+            ),
+            modify_disappearing_message_timer: Some(
+                ops.build_modify_disappearing_messages_timer_action(
+                    &Timer { duration: 86_400 },
+                    &mut rng,
+                ),
+            ),
+            modify_attributes_access: Some(
+                ops.build_modify_attributes_access_action(
+                    AccessRequired::Administrator,
+                ),
+            ),
+            modify_member_access: Some(
+                ops.build_modify_members_access_action(AccessRequired::Member),
+            ),
+            ..Default::default()
+        };
+        let group_change = proto::GroupChange {
+            actions: actions.encode_to_vec(),
+            server_signature: vec![],
+            change_epoch: 0,
+        };
+
+        let changes = ops.decrypt_group_change(group_change).unwrap();
+        assert_eq!(changes.version, 7);
+        assert_eq!(changes.editor, editor);
+        assert!(changes
+            .changes
+            .iter()
+            .any(|c| matches!(c, GroupChange::Title(t) if t == "Renamed")));
+        assert!(changes.changes.iter().any(
+            |c| matches!(c, GroupChange::Description(Some(d)) if d == "About us")
+        ));
+        assert!(changes.changes.iter().any(
+            |c| matches!(c, GroupChange::Timer(Some(t)) if t.duration == 86_400)
+        ));
+        assert!(changes.changes.iter().any(|c| matches!(
+            c,
+            GroupChange::AttributeAccess(AccessRequired::Administrator)
+        )));
+        assert!(changes.changes.iter().any(|c| matches!(
+            c,
+            GroupChange::MemberAccess(AccessRequired::Member)
+        )));
     }
 
     #[test]
