@@ -97,6 +97,14 @@ pub enum ServiceError {
     #[error("groups v2 (zero-knowledge) error")]
     GroupsV2Error,
 
+    /// The server refused a group change because its `version` was not the group's
+    /// current revision plus one: another client changed the group since the change
+    /// was built. Refetch the group, rebuild the change against the new revision, and
+    /// resend — do not bump the version and resend the same actions, since the change
+    /// may no longer be what was intended.
+    #[error("group change rejected: the group has moved past the revision it was built against")]
+    GroupChangeConflict,
+
     #[error(transparent)]
     GroupsV2DecryptionError(#[from] GroupDecodingError),
 

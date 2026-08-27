@@ -8,8 +8,7 @@ use crate::{
 };
 
 use libsignal_core::DeviceId;
-use prost::Message;
-use protobuf::ProtobufResponseExt;
+use protobuf::{ProtobufRequestBuilderExt, ProtobufResponseExt};
 use reqwest::{Method, RequestBuilder};
 use reqwest_websocket::Upgrade;
 use serde::{Deserialize, Serialize};
@@ -248,27 +247,56 @@ impl PushService {
         credentials: HttpAuth,
         group: crate::proto::Group,
     ) -> Result<(), ServiceError> {
-        let mut buf = Vec::with_capacity(group.encoded_len());
-        group.encode(&mut buf).expect("infallible encode into Vec");
-
         self.request(
             Method::PUT,
             Endpoint::storage("/v1/groups/"),
             HttpAuthOverride::Identified(credentials),
         )?
-        .header("Content-Type", "application/x-protobuf")
-        .body(buf)
+        .protobuf(group)
         .send()
         .await?
         .service_error_for_status()
         .await?;
         Ok(())
     }
+
+    /// Apply a change-set to a group.
+    ///
+    /// `actions.version` must be the group's current revision plus one; anything else
+    /// is a [`ServiceError::GroupChangeConflict`]. Leave `source_user_id` and `group_id`
+    /// unset — the server fills them in, and rejects a request that sets `group_id`.
+    ///
+    /// The response is the change as the server signed it, with those two fields
+    /// populated so the signature binds to this group. Members receive those bytes
+    /// inside a `GroupContextV2` and can apply the change without a fetch.
+    pub(crate) async fn patch_group(
+        &mut self,
+        credentials: HttpAuth,
+        actions: crate::proto::group_change::Actions,
+    ) -> Result<crate::proto::GroupChange, ServiceError> {
+        let response = self
+            .request(
+                Method::PATCH,
+                Endpoint::storage("/v1/groups/"),
+                HttpAuthOverride::Identified(credentials),
+            )?
+            .protobuf(actions)
+            .send()
+            .await?;
+
+        // Must precede `service_error_for_status`, which maps CONFLICT to
+        // MismatchedDevices and would try to parse this protobuf body as JSON.
+        if response.status().as_u16() == 409 {
+            return Err(ServiceError::GroupChangeConflict);
+        }
+
+        response.service_error_for_status().await?.protobuf().await
+    }
 }
 
 pub(crate) mod protobuf {
     use async_trait::async_trait;
-    use prost::{EncodeError, Message};
+    use prost::Message;
     use reqwest::{header, RequestBuilder, Response};
 
     use super::ServiceError;
@@ -279,11 +307,7 @@ pub(crate) mod protobuf {
     {
         /// Set the request payload encoded as protobuf.
         /// Sets the `Content-Type` header to `application/x-protobuf`
-        #[allow(dead_code)]
-        fn protobuf<T: Message + Default>(
-            self,
-            value: T,
-        ) -> Result<Self, EncodeError>;
+        fn protobuf<T: Message>(self, value: T) -> Self;
     }
 
     #[async_trait::async_trait]
@@ -295,15 +319,9 @@ pub(crate) mod protobuf {
     }
 
     impl ProtobufRequestBuilderExt for RequestBuilder {
-        fn protobuf<T: Message + Default>(
-            self,
-            value: T,
-        ) -> Result<Self, EncodeError> {
-            let mut buf = Vec::new();
-            value.encode(&mut buf)?;
-            let this =
-                self.header(header::CONTENT_TYPE, "application/x-protobuf");
-            Ok(this.body(buf))
+        fn protobuf<T: Message>(self, value: T) -> Self {
+            self.header(header::CONTENT_TYPE, "application/x-protobuf")
+                .body(value.encode_to_vec())
         }
     }
 
