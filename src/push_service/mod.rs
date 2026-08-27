@@ -8,8 +8,7 @@ use crate::{
 };
 
 use libsignal_core::DeviceId;
-use prost::Message;
-use protobuf::ProtobufResponseExt;
+use protobuf::{ProtobufRequestBuilderExt, ProtobufResponseExt};
 use reqwest::{Method, RequestBuilder};
 use reqwest_websocket::Upgrade;
 use serde::{Deserialize, Serialize};
@@ -248,16 +247,12 @@ impl PushService {
         credentials: HttpAuth,
         group: crate::proto::Group,
     ) -> Result<(), ServiceError> {
-        let mut buf = Vec::with_capacity(group.encoded_len());
-        group.encode(&mut buf).expect("infallible encode into Vec");
-
         self.request(
             Method::PUT,
             Endpoint::storage("/v1/groups/"),
             HttpAuthOverride::Identified(credentials),
         )?
-        .header("Content-Type", "application/x-protobuf")
-        .body(buf)
+        .protobuf(group)
         .send()
         .await?
         .service_error_for_status()
@@ -279,19 +274,13 @@ impl PushService {
         credentials: HttpAuth,
         actions: crate::proto::group_change::Actions,
     ) -> Result<crate::proto::GroupChange, ServiceError> {
-        let mut buf = Vec::with_capacity(actions.encoded_len());
-        actions
-            .encode(&mut buf)
-            .expect("infallible encode into Vec");
-
         let response = self
             .request(
                 Method::PATCH,
                 Endpoint::storage("/v1/groups/"),
                 HttpAuthOverride::Identified(credentials),
             )?
-            .header("Content-Type", "application/x-protobuf")
-            .body(buf)
+            .protobuf(actions)
             .send()
             .await?;
 
@@ -307,7 +296,7 @@ impl PushService {
 
 pub(crate) mod protobuf {
     use async_trait::async_trait;
-    use prost::{EncodeError, Message};
+    use prost::Message;
     use reqwest::{header, RequestBuilder, Response};
 
     use super::ServiceError;
@@ -318,11 +307,7 @@ pub(crate) mod protobuf {
     {
         /// Set the request payload encoded as protobuf.
         /// Sets the `Content-Type` header to `application/x-protobuf`
-        #[allow(dead_code)]
-        fn protobuf<T: Message + Default>(
-            self,
-            value: T,
-        ) -> Result<Self, EncodeError>;
+        fn protobuf<T: Message>(self, value: T) -> Self;
     }
 
     #[async_trait::async_trait]
@@ -334,15 +319,9 @@ pub(crate) mod protobuf {
     }
 
     impl ProtobufRequestBuilderExt for RequestBuilder {
-        fn protobuf<T: Message + Default>(
-            self,
-            value: T,
-        ) -> Result<Self, EncodeError> {
-            let mut buf = Vec::new();
-            value.encode(&mut buf)?;
-            let this =
-                self.header(header::CONTENT_TYPE, "application/x-protobuf");
-            Ok(this.body(buf))
+        fn protobuf<T: Message>(self, value: T) -> Self {
+            self.header(header::CONTENT_TYPE, "application/x-protobuf")
+                .body(value.encode_to_vec())
         }
     }
 

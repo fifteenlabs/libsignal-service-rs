@@ -244,21 +244,30 @@ impl<C: CredentialsCache> GroupsManager<C> {
         Ok(HttpAuth { username, password })
     }
 
-    pub async fn fetch_encrypted_group<R: Rng + CryptoRng>(
+    async fn group_authorization<R: Rng + CryptoRng>(
         &mut self,
         csprng: &mut R,
         master_key_bytes: &[u8],
-    ) -> Result<crate::proto::Group, ServiceError> {
+    ) -> Result<HttpAuth, ServiceError> {
         let group_master_key = GroupMasterKey::new(
             master_key_bytes
                 .try_into()
                 .map_err(|_| ServiceError::GroupsV2Error)?,
         );
-        let group_secret_params =
-            GroupSecretParams::derive_from_master_key(group_master_key);
-        let authorization = self
-            .get_authorization_for_today(csprng, group_secret_params)
-            .await?;
+        self.get_authorization_for_today(
+            csprng,
+            GroupSecretParams::derive_from_master_key(group_master_key),
+        )
+        .await
+    }
+
+    pub async fn fetch_encrypted_group<R: Rng + CryptoRng>(
+        &mut self,
+        csprng: &mut R,
+        master_key_bytes: &[u8],
+    ) -> Result<crate::proto::Group, ServiceError> {
+        let authorization =
+            self.group_authorization(csprng, master_key_bytes).await?;
         self.identified_push_service.get_group(authorization).await
     }
 
@@ -274,16 +283,8 @@ impl<C: CredentialsCache> GroupsManager<C> {
         master_key_bytes: &[u8],
         group: crate::proto::Group,
     ) -> Result<(), ServiceError> {
-        let group_master_key = GroupMasterKey::new(
-            master_key_bytes
-                .try_into()
-                .map_err(|_| ServiceError::GroupsV2Error)?,
-        );
-        let group_secret_params =
-            GroupSecretParams::derive_from_master_key(group_master_key);
-        let authorization = self
-            .get_authorization_for_today(csprng, group_secret_params)
-            .await?;
+        let authorization =
+            self.group_authorization(csprng, master_key_bytes).await?;
         self.identified_push_service
             .create_group(authorization, group)
             .await
@@ -301,16 +302,8 @@ impl<C: CredentialsCache> GroupsManager<C> {
         master_key_bytes: &[u8],
         actions: crate::proto::group_change::Actions,
     ) -> Result<crate::proto::GroupChange, ServiceError> {
-        let group_master_key = GroupMasterKey::new(
-            master_key_bytes
-                .try_into()
-                .map_err(|_| ServiceError::GroupsV2Error)?,
-        );
-        let group_secret_params =
-            GroupSecretParams::derive_from_master_key(group_master_key);
-        let authorization = self
-            .get_authorization_for_today(csprng, group_secret_params)
-            .await?;
+        let authorization =
+            self.group_authorization(csprng, master_key_bytes).await?;
         self.identified_push_service
             .patch_group(authorization, actions)
             .await
