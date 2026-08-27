@@ -289,6 +289,33 @@ impl<C: CredentialsCache> GroupsManager<C> {
             .await
     }
 
+    /// Apply a change-set to a group and return it as the server signed it.
+    ///
+    /// Build the actions with the `build_modify_*` helpers on [`GroupOperations`],
+    /// with `version` set to the group's current revision plus one. A stale revision
+    /// comes back as [`ServiceError::GroupChangeConflict`]; refetch the group with
+    /// [`fetch_encrypted_group`](Self::fetch_encrypted_group) and rebuild.
+    pub async fn patch_group<R: Rng + CryptoRng>(
+        &mut self,
+        csprng: &mut R,
+        master_key_bytes: &[u8],
+        actions: crate::proto::group_change::Actions,
+    ) -> Result<crate::proto::GroupChange, ServiceError> {
+        let group_master_key = GroupMasterKey::new(
+            master_key_bytes
+                .try_into()
+                .map_err(|_| ServiceError::GroupsV2Error)?,
+        );
+        let group_secret_params =
+            GroupSecretParams::derive_from_master_key(group_master_key);
+        let authorization = self
+            .get_authorization_for_today(csprng, group_secret_params)
+            .await?;
+        self.identified_push_service
+            .patch_group(authorization, actions)
+            .await
+    }
+
     #[tracing::instrument(
         skip(self, group_secret_params),
         fields(path = %path[..4.min(path.len())]),

@@ -264,6 +264,45 @@ impl PushService {
         .await?;
         Ok(())
     }
+
+    /// Apply a change-set to a group.
+    ///
+    /// `actions.version` must be the group's current revision plus one; anything else
+    /// is a [`ServiceError::GroupChangeConflict`]. Leave `source_user_id` and `group_id`
+    /// unset — the server fills them in, and rejects a request that sets `group_id`.
+    ///
+    /// The response is the change as the server signed it, with those two fields
+    /// populated so the signature binds to this group. Members receive those bytes
+    /// inside a `GroupContextV2` and can apply the change without a fetch.
+    pub(crate) async fn patch_group(
+        &mut self,
+        credentials: HttpAuth,
+        actions: crate::proto::group_change::Actions,
+    ) -> Result<crate::proto::GroupChange, ServiceError> {
+        let mut buf = Vec::with_capacity(actions.encoded_len());
+        actions
+            .encode(&mut buf)
+            .expect("infallible encode into Vec");
+
+        let response = self
+            .request(
+                Method::PATCH,
+                Endpoint::storage("/v1/groups/"),
+                HttpAuthOverride::Identified(credentials),
+            )?
+            .header("Content-Type", "application/x-protobuf")
+            .body(buf)
+            .send()
+            .await?;
+
+        // Must precede `service_error_for_status`, which maps CONFLICT to
+        // MismatchedDevices and would try to parse this protobuf body as JSON.
+        if response.status().as_u16() == 409 {
+            return Err(ServiceError::GroupChangeConflict);
+        }
+
+        response.service_error_for_status().await?.protobuf().await
+    }
 }
 
 pub(crate) mod protobuf {
