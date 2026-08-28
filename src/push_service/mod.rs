@@ -284,14 +284,30 @@ impl PushService {
             .send()
             .await?;
 
-        // Must precede `service_error_for_status`, which maps CONFLICT to
-        // MismatchedDevices and would try to parse this protobuf body as JSON.
-        if response.status().as_u16() == 409 {
-            return Err(ServiceError::GroupChangeConflict);
+        // Must precede `service_error_for_status`: it maps CONFLICT to
+        // MismatchedDevices and FORBIDDEN to Unauthorized, and would try to parse
+        // this endpoint's bodies as the JSON those errors carry.
+        match response.status().as_u16() {
+            409 => return Err(ServiceError::GroupChangeConflict),
+            403 => return Err(ServiceError::GroupChangeForbidden),
+            400 => {
+                let body = response.text().await?;
+                let message =
+                    serde_json::from_str::<GroupChangeRejection>(&body)
+                        .map(|rejection| rejection.message)
+                        .unwrap_or(body);
+                return Err(ServiceError::GroupChangeRejected { message });
+            },
+            _ => {},
         }
 
         response.service_error_for_status().await?.protobuf().await
     }
+}
+
+#[derive(Deserialize)]
+struct GroupChangeRejection {
+    message: String,
 }
 
 pub(crate) mod protobuf {
