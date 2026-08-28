@@ -105,6 +105,20 @@ pub enum ServiceError {
     #[error("group change rejected: the group has moved past the revision it was built against")]
     GroupChangeConflict,
 
+    /// The server understood the change and refused it on its merits: adding
+    /// someone who is already a member, adding oneself, a role the action cannot
+    /// carry, a member whose presentation did not verify. `message` is the server's
+    /// own wording when its body had one.
+    #[error("group change rejected: {message}")]
+    GroupChangeRejected { message: String },
+
+    /// The group's access rules do not let this account make the change — or this
+    /// account is no longer in the group at all; the server does not say which.
+    #[error(
+        "group change forbidden: not permitted for this account in this group"
+    )]
+    GroupChangeForbidden,
+
     #[error(transparent)]
     GroupsV2DecryptionError(#[from] GroupDecodingError),
 

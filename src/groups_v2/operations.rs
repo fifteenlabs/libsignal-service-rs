@@ -838,6 +838,26 @@ impl GroupOperations {
         })
     }
 
+    /// Promote a member to administrator or demote one back to a plain member.
+    ///
+    /// Administrators only, and only for full members: the id is an ACI, matching
+    /// what `decrypt_group_change` reads back from the action. Adding someone as an
+    /// administrator directly is not a thing — see `build_add_member_action` — so
+    /// this is the only way a member's role changes.
+    pub fn build_modify_member_role_action(
+        &self,
+        aci: Aci,
+        role: super::model::Role,
+    ) -> Result<
+        proto::group_change::actions::ModifyMemberRoleAction,
+        GroupDecodingError,
+    > {
+        Ok(proto::group_change::actions::ModifyMemberRoleAction {
+            user_id: self.encrypt_aci(aci)?,
+            role: role.into(),
+        })
+    }
+
     /// Build a DeletePendingMemberAction to retract an outstanding invitation.
     ///
     /// Used when a pending member (invite not yet accepted) is to be removed.
@@ -1302,6 +1322,42 @@ mod tests {
         assert!(changes.changes.iter().any(|c| matches!(
             c,
             GroupChange::MemberAccess(AccessRequired::Member)
+        )));
+    }
+
+    #[test]
+    fn member_role_action_decrypts_to_the_change_it_encodes() {
+        use super::super::model::{GroupChange, Role};
+
+        let ops = create_group_operations();
+        let editor = Aci::parse_from_service_id_string(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .expect("valid ACI");
+        let promoted = Aci::parse_from_service_id_string(
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        )
+        .expect("valid ACI");
+        let actions = proto::group_change::Actions {
+            source_user_id: ops.encrypt_aci(editor).unwrap(),
+            group_id: ops.group_secret_params.get_group_identifier().to_vec(),
+            version: 3,
+            modify_member_roles: vec![ops
+                .build_modify_member_role_action(promoted, Role::Administrator)
+                .unwrap()],
+            ..Default::default()
+        };
+        let changes = ops
+            .decrypt_group_change(proto::GroupChange {
+                actions: actions.encode_to_vec(),
+                server_signature: vec![],
+                change_epoch: 0,
+            })
+            .unwrap();
+
+        assert!(changes.changes.iter().any(|c| matches!(
+            c,
+            GroupChange::ModifyMemberRole { aci, role: Role::Administrator } if *aci == promoted
         )));
     }
 
