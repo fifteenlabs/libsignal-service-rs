@@ -41,6 +41,7 @@ use crate::websocket::keys::PreKeyStatus;
 use crate::websocket::registration::CaptchaAttributes;
 use crate::websocket::{self, SignalWebSocket};
 use crate::{
+    cipher::OutgoingContent,
     configuration::Endpoint,
     pre_keys::PreKeyState,
     profile_cipher::{ProfileCipher, ProfileCipherError},
@@ -839,12 +840,13 @@ impl AccountManager {
                 ..SyncMessage::default()
             };
             let content: ContentBody = msg.into();
+            let content_bytes = content.into_proto().encode_to_vec();
             let msg = sender
                 .create_encrypted_message(
                     &local_aci.into(),
                     None,
                     local_device_id,
-                    &content.into_proto().encode_to_vec(),
+                    OutgoingContent::Encrypted(&content_bytes),
                 )
                 .await?;
             device_messages.push(msg);

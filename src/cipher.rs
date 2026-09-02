@@ -31,6 +31,31 @@ use crate::{
     ServiceIdExt,
 };
 
+/// The body of an outgoing envelope, before it is turned into an
+/// [`OutgoingPushMessage`].
+///
+/// Almost everything is [`OutgoingContent::Encrypted`]: a serialised
+/// `Content` protobuf that gets padded and run through the session (or through
+/// sealed sender).  [`OutgoingContent::Plaintext`] exists for the one message
+/// that may not depend on a session, a `DecryptionErrorMessage` reporting that
+/// very session as broken.
+#[derive(Clone, Copy)]
+pub(crate) enum OutgoingContent<'a> {
+    Encrypted(&'a [u8]),
+    Plaintext(&'a PlaintextContent),
+}
+
+impl OutgoingContent<'_> {
+    fn len(&self) -> usize {
+        match self {
+            OutgoingContent::Encrypted(content) => content.len(),
+            OutgoingContent::Plaintext(plaintext) => {
+                plaintext.serialized().len()
+            },
+        }
+    }
+}
+
 /// Decrypts incoming messages and encrypts outgoing messages.
 ///
 /// Equivalent of SignalServiceCipher in Java.
@@ -118,10 +143,10 @@ where
     ///
     /// **NOTE**: must process `Metadata::pni_verified` to confirm the sender's
     /// PNI, not the raw side-car message.
-    #[tracing::instrument(skip(envelope, csprng), fields(envelope = debug_envelope(&envelope)))]
+    #[tracing::instrument(skip(envelope, csprng), fields(envelope = debug_envelope(envelope)))]
     pub async fn open_envelope<R: Rng + CryptoRng>(
         &mut self,
-        envelope: Envelope,
+        envelope: &Envelope,
         csprng: &mut R,
     ) -> Result<Option<Content>, ServiceError> {
         let local_service: ServiceId =
@@ -129,7 +154,7 @@ where
                 .expect("valid protocol address name");
 
         if envelope.content.is_some() {
-            let plaintext = self.decrypt(&envelope, csprng).await?;
+            let plaintext = self.decrypt(envelope, csprng).await?;
             let was_plaintext = plaintext.metadata.was_plaintext;
 
             tracing::Span::current()
@@ -614,7 +639,7 @@ where
         &mut self,
         address: &ProtocolAddress,
         unidentified_access: Option<&SenderCertificate>,
-        content: &[u8],
+        content: OutgoingContent<'_>,
         csprng: &mut R,
     ) -> Result<OutgoingPushMessage, ServiceError> {
         let mut rng = rng();
@@ -629,6 +654,29 @@ where
                 "encrypt",
             ))
         })?;
+
+        // A `PlaintextContent` envelope is not encrypted, so it deliberately
+        // skips every step below that touches the session: the sender chain
+        // usability check, the padding (a `PlaintextContent` carries its own
+        // boundary byte) and the ratchet itself.  Only the remote registration
+        // id is read from the session, because the server matches it against
+        // the destination device before accepting the message.
+        //
+        // This is what makes a 1:1 decryption error message deliverable: the
+        // session it complains about is exactly the one that cannot be used.
+        let content = match content {
+            OutgoingContent::Plaintext(plaintext) => {
+                return Ok(OutgoingPushMessage {
+                    r#type: crate::proto::envelope::Type::PlaintextContent
+                        as u32,
+                    destination_device_id: address.device_id(),
+                    destination_registration_id: session_record
+                        .remote_registration_id()?,
+                    content: BASE64_RELAXED.encode(plaintext.serialized()),
+                });
+            },
+            OutgoingContent::Encrypted(content) => content,
+        };
 
         let record_usable = session_record
             .has_usable_sender_chain(
@@ -776,6 +824,14 @@ pub async fn get_preferred_protocol_address<S: SessionStore>(
 pub struct SealedSenderDecryptionError {
     pub inner: SignalProtocolError,
     pub sender: Option<ProtocolAddress>,
+    /// The inner message that failed, when the sealed sender envelope itself
+    /// opened cleanly and only the payload underneath did not.
+    ///
+    /// A 1:1 retry receipt has to name the message it is complaining about, and
+    /// under sealed sender the ciphertext the peer knows is this inner one, not
+    /// the envelope we received. `None` when the failure happened before the
+    /// payload was reached.
+    pub original: Option<(CiphertextMessageType, Vec<u8>)>,
 }
 
 impl fmt::Debug for SealedSenderDecryptionError {
@@ -783,6 +839,7 @@ impl fmt::Debug for SealedSenderDecryptionError {
         f.debug_struct("SealedSenderDecryptionError")
             .field("inner", &self.inner)
             .field("sender", &self.sender)
+            .field("original", &self.original.as_ref().map(|(t, _)| t))
             .finish()
     }
 }
@@ -792,6 +849,7 @@ impl From<SignalProtocolError> for SealedSenderDecryptionError {
         SealedSenderDecryptionError {
             inner: e,
             sender: None,
+            original: None,
         }
     }
 }
@@ -877,21 +935,20 @@ async fn sealed_sender_decrypt(
     // Everything above reads the sender certificate, not the session; only the
     // call below advances the ratchet, so this is the first point at which the
     // peer is known and the last at which the lock is still cheap.
-    let _session_guard = match ServiceId::parse_from_service_id_string(
-        remote_address.name(),
-    ) {
-        Some(sender) => Some(session_locks.lock(&sender).await),
-        // Certificate validation above already parsed this as a UUID, so a
-        // failure here is unreachable; decrypting unlocked is still safer than
-        // refusing a message we can otherwise read.
-        None => {
-            tracing::warn!(
+    let _session_guard =
+        match ServiceId::parse_from_service_id_string(remote_address.name()) {
+            Some(sender) => Some(session_locks.lock(&sender).await),
+            // Certificate validation above already parsed this as a UUID, so a
+            // failure here is unreachable; decrypting unlocked is still safer than
+            // refusing a message we can otherwise read.
+            None => {
+                tracing::warn!(
                 "sealed sender address is not a service id; decrypting without \
                  a session lock"
             );
-            None
-        },
-    };
+                None
+            },
+        };
 
     sealed_sender_decrypt_with_validated_usmc(
         &usmc,
@@ -908,6 +965,10 @@ async fn sealed_sender_decrypt(
     .map_err(|inner| SealedSenderDecryptionError {
         inner,
         sender: Some(remote_address),
+        original: usmc
+            .msg_type()
+            .ok()
+            .zip(usmc.contents().ok().map(<[u8]>::to_vec)),
     })
 }
 

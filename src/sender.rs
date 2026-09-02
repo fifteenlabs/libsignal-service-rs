@@ -3,9 +3,10 @@ use std::{collections::HashSet, time::SystemTime};
 use chrono::prelude::*;
 use libsignal_core::{curve::CurveError, InvalidDeviceId};
 use libsignal_protocol::{
-    process_prekey_bundle, Aci, DeviceId, IdentityKey, IdentityKeyPair, Pni,
+    process_prekey_bundle, Aci, CiphertextMessageType, DecryptionErrorMessage,
+    DeviceId, IdentityKey, IdentityKeyPair, PlaintextContent, Pni,
     ProtocolStore, SenderCertificate, SenderKeyStore, ServiceId,
-    SessionNotFound, SignalProtocolError,
+    SessionNotFound, SignalProtocolError, Timestamp,
 };
 use rand::{rng, CryptoRng, Rng};
 use tracing::{debug, error, info, trace, warn};
@@ -14,7 +15,7 @@ use uuid::Uuid;
 use zkgroup::GROUP_IDENTIFIER_LEN;
 
 use crate::{
-    cipher::{get_preferred_protocol_address, ServiceCipher},
+    cipher::{get_preferred_protocol_address, OutgoingContent, ServiceCipher},
     content::ContentBody,
     proto::{
         attachment_pointer::{
@@ -526,55 +527,70 @@ where
         results
     }
 
-    /// Send a sender-key retry receipt
+    /// Send a retry receipt: ask `recipient` to repair whatever broke and resend
+    /// a message we could not decrypt.
     ///
-    /// The receipt goes out as a regular encrypted (or sealed-sender encrypted,
-    /// when `unidentified_access` is supplied) `Content`, so it rides the same
-    /// fan-out, session repair, and retry machinery as any other message.
+    /// Covers both failure kinds, because the wire format is the same for both.
+    /// `DecryptionErrorMessage::for_original` reads `failed_type` and attaches a
+    /// `ratchet_key` for the 1:1 ciphers (`Whisper`, `PreKey`) and none for
+    /// `SenderKey`; the peer uses its presence to tell "archive this session"
+    /// from "redistribute this sender key".
     ///
-    /// Divergences from the official clients:
-    /// - Official clients deliver retry receipts as unencrypted `PlaintextContent`;
-    ///   receiving clients accept the DEM inside an encrypted `Content` too.
-    /// - Under sealed sender they use `ContentHint::Implicit` and attach the
-    ///   group id; our sealed path hardcodes `ContentHint::Default` without a
-    ///   group id (see `sealed_sender_encrypt`).  Harmless in practice: the
-    ///   receipt's original sender finds its send-log entry by timestamp.
+    /// The receipt goes out as an unencrypted `PlaintextContent` envelope
+    /// (`PLAINTEXT_CONTENT`), which is what the official clients send and is not
+    /// merely a stylistic choice:
+    ///
+    /// - For a 1:1 failure it is a necessity — encrypting would require the very
+    ///   session being reported as broken.
+    /// - For a sender-key failure it is a compatibility requirement. Signal-iOS
+    ///   discards any envelope whose content carries a `decryptionErrorMessage`
+    ///   unless the cipher was plaintext (`DecryptedIncomingEnvelope.init`:
+    ///   "Plaintext ciphers must have decryption errors"), so an encrypted
+    ///   receipt is dropped before iOS ever looks at it. Android and Desktop
+    ///   accept either, which makes the bug look intermittent: receipts appear
+    ///   to work until a peer happens to be on iOS.
+    ///
+    /// The `Content` therefore has to carry *only* the decryption error message.
+    /// iOS also throws on `hasDecryptionError && hasAnythingElse`, so nothing may
+    /// be piggybacked onto it — `PlaintextContent::from` builds the right shape,
+    /// so do not hand-roll the proto.
+    ///
+    /// Sent identified rather than sealed: the payload is unencrypted either way,
+    /// so sealing would only hide which of us is complaining from the server, and
+    /// the identified path needs no unidentified-access key to be present.
     #[tracing::instrument(
-        skip(self, unidentified_access),
-        fields(recipient = recipient.service_id_string(), unidentified_send = unidentified_access.is_some(), failed_timestamp),
+        skip(self, failed_ciphertext),
+        fields(
+            recipient = recipient.service_id_string(),
+            ?failed_type,
+            failed_ciphertext = failed_ciphertext.len(),
+            failed_timestamp,
+        ),
     )]
-    pub async fn send_sender_key_decryption_error_message(
+    pub async fn send_decryption_error_message(
         &mut self,
         recipient: &ServiceId,
-        unidentified_access: Option<UnidentifiedAccess>,
+        failed_type: CiphertextMessageType,
+        failed_ciphertext: &[u8],
         failed_timestamp: u64,
         failed_device: DeviceId,
     ) -> Result<(), MessageSenderError> {
         info!("sending retry receipt/decryption error");
 
-        // The absent `ratchet_key` marks this as a sender-key failure.
-        // This function assumes the 1:1 session is intact, and hence tries to
-        // transmit the DME through the 1:1 encrypted (sealed, if available) channel.
-        //
-        // A DME for a 1:1 decrypt failure carries `ratchet_key`
-        // and must be deliverable *without* depending on the session under
-        // repair; upstream sends those as unencrypted `PlaintextContent`
-        // (or sealed USMC) envelopes.  Implement that case as a sibling
-        // function producing plaintext envelopes over this same fan-out.
-        let content_body = ContentBody::DecryptionErrorMessage(
-            crate::proto::DecryptionErrorMessage {
-                ratchet_key: None,
-                timestamp: Some(failed_timestamp),
-                device_id: Some(failed_device.into()),
-            },
-        );
+        let error_message = DecryptionErrorMessage::for_original(
+            failed_ciphertext,
+            failed_type,
+            Timestamp::from_epoch_millis(failed_timestamp),
+            failed_device.into(),
+        )?;
 
-        self.try_send_message(
+        let plaintext = PlaintextContent::from(error_message);
+
+        self.try_send_content(
             *recipient,
-            unidentified_access.as_ref(),
-            &content_body,
+            None,
+            OutgoingContent::Plaintext(&plaintext),
             Utc::now().timestamp_millis() as u64,
-            false,
             false,
         )
         .await?;
@@ -591,10 +607,44 @@ where
     async fn try_send_message(
         &mut self,
         recipient: ServiceId,
-        mut unidentified_access: Option<&UnidentifiedAccess>,
+        unidentified_access: Option<&UnidentifiedAccess>,
         content_body: &ContentBody,
         timestamp: u64,
         include_pni_signature: bool,
+        online: bool,
+    ) -> SendMessageResult {
+        use prost::Message;
+
+        let mut content = content_body.clone().into_proto();
+        if include_pni_signature {
+            content.pni_signature_message = Some(self.create_pni_signature()?);
+        }
+
+        let content_bytes = content.encode_to_vec();
+
+        self.try_send_content(
+            recipient,
+            unidentified_access,
+            OutgoingContent::Encrypted(&content_bytes),
+            timestamp,
+            online,
+        )
+        .await
+    }
+
+    /// Fan a single envelope body out over every device of `recipient`, repairing
+    /// sessions and retrying as the server asks.
+    #[tracing::instrument(
+        level = "trace",
+        skip(self, unidentified_access, content, recipient),
+        fields(unidentified_access = unidentified_access.is_some(), recipient = recipient.service_id_string()),
+    )]
+    async fn try_send_content(
+        &mut self,
+        recipient: ServiceId,
+        mut unidentified_access: Option<&UnidentifiedAccess>,
+        content: OutgoingContent<'_>,
+        timestamp: u64,
         online: bool,
     ) -> SendMessageResult {
         trace!("trying to send a message");
@@ -606,17 +656,7 @@ where
         // order. Sends to *different* peers still overlap — only same-peer work
         // waits — and no second lock is ever taken while this one is held, so
         // there is nothing to deadlock against.
-        let _session_guard =
-            self.cipher.session_locks().lock(&recipient).await;
-
-        use prost::Message;
-
-        let mut content = content_body.clone().into_proto();
-        if include_pni_signature {
-            content.pni_signature_message = Some(self.create_pni_signature()?);
-        }
-
-        let content_bytes = content.encode_to_vec();
+        let _session_guard = self.cipher.session_locks().lock(&recipient).await;
 
         let mut rng = rng();
 
@@ -628,7 +668,7 @@ where
                 .create_encrypted_messages(
                     &recipient,
                     unidentified_access.map(|x| &x.certificate),
-                    &content_bytes,
+                    content,
                 )
                 .await?
             else {
@@ -925,7 +965,7 @@ where
         &mut self,
         recipient: &ServiceId,
         unidentified_access: Option<&SenderCertificate>,
-        content: &[u8],
+        content: OutgoingContent<'_>,
     ) -> Result<Option<EncryptedMessages>, MessageSenderError> {
         let mut messages = vec![];
 
@@ -1036,7 +1076,7 @@ where
         recipient: &ServiceId,
         unidentified_access: Option<&SenderCertificate>,
         device_id: DeviceId,
-        content: &[u8],
+        content: OutgoingContent<'_>,
     ) -> Result<OutgoingPushMessage, MessageSenderError> {
         let recipient_protocol_address =
             recipient.to_protocol_address(device_id);
