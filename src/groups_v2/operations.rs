@@ -364,6 +364,30 @@ impl GroupOperations {
             .encrypt_blob_with_padding(randomness, &buf, 0)
     }
 
+    /// Encrypt an optional string field, the twin of
+    /// [`maybe_decrypt_string`](Self::maybe_decrypt_string): `None` and the empty
+    /// string both encode as empty, which is how every Signal client says "unset".
+    ///
+    /// Member labels are the padded blob of the string's own bytes rather than a
+    /// [`GroupAttributeBlob`], so this cannot go through
+    /// [`encrypt_blob_content`](Self::encrypt_blob_content).
+    fn maybe_encrypt_string<R: rand::Rng + rand::CryptoRng>(
+        &self,
+        s: Option<&str>,
+        rng: &mut R,
+    ) -> Vec<u8> {
+        let Some(s) = s.filter(|s| !s.is_empty()) else {
+            return vec![];
+        };
+        let mut randomness = [0u8; 32];
+        rng.fill_bytes(&mut randomness);
+        self.group_secret_params.encrypt_blob_with_padding(
+            randomness,
+            s.as_bytes(),
+            0,
+        )
+    }
+
     pub fn encrypt_title<R: rand::Rng + rand::CryptoRng>(
         &self,
         title: &str,
@@ -941,6 +965,48 @@ impl GroupOperations {
         }
     }
 
+    /// Who may set a member label. Same domain as
+    /// [`build_modify_attributes_access_action`](Self::build_modify_attributes_access_action).
+    pub fn build_modify_member_label_access_action(
+        &self,
+        access: AccessRequired,
+    ) -> proto::group_change::actions::ModifyMemberLabelAccessControlAction
+    {
+        proto::group_change::actions::ModifyMemberLabelAccessControlAction {
+            member_label_access: access.into(),
+        }
+    }
+
+    /// Set or clear one member's label. `None` clears the field, as does an
+    /// empty string — see
+    /// [`maybe_encrypt_string`](Self::maybe_encrypt_string).
+    pub fn build_modify_member_label_action<R: rand::Rng + rand::CryptoRng>(
+        &self,
+        aci: Aci,
+        label_string: Option<&str>,
+        label_emoji: Option<&str>,
+        rng: &mut R,
+    ) -> Result<
+        proto::group_change::actions::ModifyMemberLabelAction,
+        GroupDecodingError,
+    > {
+        Ok(proto::group_change::actions::ModifyMemberLabelAction {
+            user_id: self.encrypt_aci(aci)?,
+            label_emoji: self.maybe_encrypt_string(label_emoji, rng),
+            label_string: self.maybe_encrypt_string(label_string, rng),
+        })
+    }
+
+    /// Whether only administrators may send to the group.
+    pub fn build_modify_announcements_only_action(
+        &self,
+        announcements_only: bool,
+    ) -> proto::group_change::actions::ModifyAnnouncementsOnlyAction {
+        proto::group_change::actions::ModifyAnnouncementsOnlyAction {
+            announcements_only,
+        }
+    }
+
     /// Create a presentation from a credential for adding a member to a group.
     ///
     /// This creates a ZK proof (ExpiringProfileKeyCredentialPresentation) that the
@@ -1201,7 +1267,6 @@ impl GroupOperations {
 mod tests {
     use super::*;
 
-    use rand::RngCore;
     use zkgroup::groups::GroupMasterKey;
 
     fn create_group_operations() -> GroupOperations {
@@ -1243,20 +1308,51 @@ mod tests {
     fn roundtrip_member_label() {
         let ops = create_group_operations();
         let mut rng = rand::rng();
+        let aci = Aci::parse_from_service_id_string(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .unwrap();
 
         let label = "Whisperfish / rubdos";
-        let mut randomness = [0u8; 32];
-        rng.fill_bytes(&mut randomness);
-        let encrypted = ops.group_secret_params.encrypt_blob_with_padding(
-            randomness,
-            label.as_bytes(),
-            0,
-        );
+        let action = ops
+            .build_modify_member_label_action(
+                aci,
+                Some(label),
+                Some("🐟"),
+                &mut rng,
+            )
+            .unwrap();
 
         assert_eq!(
-            ops.decrypt_member_label_text(&encrypted),
+            ops.decrypt_member_label_text(&action.label_string),
             Some(label.to_string())
         );
+        assert_eq!(
+            ops.decrypt_member_label_emoji(&action.label_emoji),
+            Some("🐟".to_string())
+        );
+        assert_eq!(
+            ops.decrypt_service_id(&action.user_id).unwrap(),
+            ServiceId::from(aci)
+        );
+    }
+
+    #[test]
+    fn a_member_label_is_cleared_by_an_empty_blob() {
+        let ops = create_group_operations();
+        let mut rng = rand::rng();
+        let aci = Aci::parse_from_service_id_string(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .unwrap();
+
+        let action = ops
+            .build_modify_member_label_action(aci, None, Some(""), &mut rng)
+            .unwrap();
+
+        assert!(action.label_string.is_empty());
+        assert!(action.label_emoji.is_empty());
+        assert_eq!(ops.decrypt_member_label_text(&action.label_string), None);
     }
 
     #[test]
