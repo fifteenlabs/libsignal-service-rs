@@ -1261,6 +1261,137 @@ impl GroupOperations {
             },
         )
     }
+
+    /// Accept an invitation: promote a pending member to a full member. The
+    /// member's profile key rides along, as when they are added directly.
+    pub fn build_promote_pending_member_action(
+        &self,
+        aci: Aci,
+        profile_key: ProfileKey,
+    ) -> Result<
+        proto::group_change::actions::PromoteMemberPendingProfileKeyAction,
+        GroupDecodingError,
+    > {
+        Ok(
+            proto::group_change::actions::PromoteMemberPendingProfileKeyAction {
+                user_id: self.encrypt_aci(aci)?,
+                profile_key: self.encrypt_profile_key(profile_key, aci)?,
+                presentation: vec![],
+            },
+        )
+    }
+
+    /// Ask to join a group through its link: the requester waits for an
+    /// administrator's approval.
+    pub fn build_add_requesting_member_action(
+        &self,
+        aci: Aci,
+        profile_key: ProfileKey,
+    ) -> Result<
+        proto::group_change::actions::AddMemberPendingAdminApprovalAction,
+        GroupDecodingError,
+    > {
+        Ok(
+            proto::group_change::actions::AddMemberPendingAdminApprovalAction {
+                added: Some(proto::MemberPendingAdminApproval {
+                    user_id: self.encrypt_aci(aci)?,
+                    profile_key: self.encrypt_profile_key(profile_key, aci)?,
+                    presentation: vec![],
+                    timestamp: 0, // Server sets
+                }),
+            },
+        )
+    }
+
+    /// Withdraw or reject a join request.
+    pub fn build_remove_requesting_member_action(
+        &self,
+        aci: Aci,
+    ) -> Result<
+        proto::group_change::actions::DeleteMemberPendingAdminApprovalAction,
+        GroupDecodingError,
+    > {
+        Ok(
+            proto::group_change::actions::DeleteMemberPendingAdminApprovalAction {
+                deleted_user_id: self.encrypt_aci(aci)?,
+            },
+        )
+    }
+
+    /// Approve a join request: the requester becomes a member with `role`.
+    pub fn build_promote_requesting_member_action(
+        &self,
+        aci: Aci,
+        role: super::model::Role,
+    ) -> Result<
+        proto::group_change::actions::PromoteMemberPendingAdminApprovalAction,
+        GroupDecodingError,
+    > {
+        Ok(
+            proto::group_change::actions::PromoteMemberPendingAdminApprovalAction {
+                user_id: self.encrypt_aci(aci)?,
+                role: role.into(),
+            },
+        )
+    }
+
+    /// Set who may join through the group link: `Any` opens it,
+    /// `Administrator` requires approval, `Unsatisfiable` turns it off.
+    pub fn build_modify_invite_link_access_action(
+        &self,
+        access: AccessRequired,
+    ) -> proto::group_change::actions::ModifyAddFromInviteLinkAccessControlAction
+    {
+        proto::group_change::actions::ModifyAddFromInviteLinkAccessControlAction {
+            add_from_invite_link_access: access.into(),
+        }
+    }
+
+    /// Reset the group link. An empty password clears it; the server issues
+    /// a new one for a link that is being enabled.
+    pub fn build_modify_invite_link_password_action(
+        &self,
+        password: Vec<u8>,
+    ) -> proto::group_change::actions::ModifyInviteLinkPasswordAction {
+        proto::group_change::actions::ModifyInviteLinkPasswordAction {
+            invite_link_password: password,
+        }
+    }
+
+    /// Point the group at a new avatar by its CDN path, or clear it with an
+    /// empty path.
+    pub fn build_modify_avatar_action(
+        &self,
+        avatar: String,
+    ) -> proto::group_change::actions::ModifyAvatarAction {
+        proto::group_change::actions::ModifyAvatarAction { avatar }
+    }
+
+    /// The `GroupChange` that [`decrypt_group_change`](Self::decrypt_group_change)
+    /// reads back as `actions` made by `editor` — the counterpart of the
+    /// server's response, minus its signature, which the decoder does not
+    /// check. The editor and the group identifier are stamped in here because
+    /// the decoder requires both; the identifier is derived from the same
+    /// secret params.
+    ///
+    /// For rebuilding group history from a source that stores it decrypted,
+    /// such as a backup, so it can be stored and read like a live change.
+    pub fn encrypt_group_change(
+        &self,
+        editor: Aci,
+        actions: proto::group_change::Actions,
+    ) -> Result<proto::GroupChange, GroupDecodingError> {
+        let actions = proto::group_change::Actions {
+            source_user_id: self.encrypt_aci(editor)?,
+            group_id: self.group_secret_params.get_group_identifier().to_vec(),
+            ..actions
+        };
+        Ok(proto::GroupChange {
+            actions: actions.encode_to_vec(),
+            server_signature: vec![],
+            change_epoch: 0,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1536,5 +1667,110 @@ mod tests {
         assert_ne!(encrypted1, encrypted2);
         assert_eq!(ops.decrypt_title(&encrypted1), title);
         assert_eq!(ops.decrypt_title(&encrypted2), title);
+    }
+
+    /// Every builder that has no other round-trip test above, sent through
+    /// `encrypt_group_change` and read back by `decrypt_group_change`. The
+    /// encrypt side is only right if the decoder accepts what it makes, so
+    /// the two are pinned to each other here rather than in a caller.
+    #[test]
+    fn encrypt_group_change_decrypts_to_the_changes_it_encodes() {
+        use super::super::model::{GroupChange, Role};
+
+        let ops = create_group_operations();
+        let editor = Aci::parse_from_service_id_string(
+            "550e8400-e29b-41d4-a716-446655440000",
+        )
+        .expect("valid ACI");
+        let member = Aci::parse_from_service_id_string(
+            "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+        )
+        .expect("valid ACI");
+        let profile_key = ProfileKey::generate(rand::random());
+
+        let actions = proto::group_change::Actions {
+            add_members: vec![ops
+                .build_add_member_action(member, profile_key, Role::Default)
+                .unwrap()],
+            promote_members_pending_profile_key: vec![ops
+                .build_promote_pending_member_action(member, profile_key)
+                .unwrap()],
+            add_members_pending_admin_approval: vec![ops
+                .build_add_requesting_member_action(member, profile_key)
+                .unwrap()],
+            delete_members_pending_admin_approval: vec![ops
+                .build_remove_requesting_member_action(member)
+                .unwrap()],
+            promote_members_pending_admin_approval: vec![ops
+                .build_promote_requesting_member_action(member, Role::Default)
+                .unwrap()],
+            add_members_pending_profile_key: vec![ops
+                .build_add_pending_member_action(
+                    member.into(),
+                    editor,
+                    Role::Default,
+                )
+                .unwrap()],
+            delete_members_pending_profile_key: vec![ops
+                .build_remove_pending_member_action(member.into())
+                .unwrap()],
+            modify_add_from_invite_link_access: Some(
+                ops.build_modify_invite_link_access_action(
+                    AccessRequired::Administrator,
+                ),
+            ),
+            modify_invite_link_password: Some(
+                ops.build_modify_invite_link_password_action(vec![]),
+            ),
+            modify_avatar: Some(ops.build_modify_avatar_action(String::new())),
+            ..Default::default()
+        };
+
+        let group_change = ops.encrypt_group_change(editor, actions).unwrap();
+        let changes = ops.decrypt_group_change(group_change).unwrap();
+
+        assert_eq!(changes.editor, editor);
+        assert_eq!(
+            changes.group_id,
+            ops.group_secret_params.get_group_identifier()
+        );
+        let has = |pred: &dyn Fn(&GroupChange) -> bool| {
+            changes.changes.iter().any(pred)
+        };
+        assert!(has(
+            &|c| matches!(c, GroupChange::NewMember(m) if m.aci == member)
+        ));
+        assert!(has(&|c| matches!(
+            c,
+            GroupChange::PromotePendingMember { address, .. } if *address == ServiceId::from(member)
+        )));
+        assert!(has(&|c| matches!(
+            c,
+            GroupChange::NewRequestingMember(m) if m.aci == member
+        )));
+        assert!(has(&|c| matches!(
+            c,
+            GroupChange::DeleteRequestingMember(aci) if *aci == member
+        )));
+        assert!(has(&|c| matches!(
+            c,
+            GroupChange::PromoteRequestingMember { aci, role: Role::Default } if *aci == member
+        )));
+        assert!(has(&|c| matches!(
+            c,
+            GroupChange::NewPendingMember(p) if p.address == ServiceId::from(member)
+        )));
+        assert!(has(&|c| matches!(
+            c,
+            GroupChange::DeletePendingMember(sid) if *sid == ServiceId::from(member)
+        )));
+        assert!(has(&|c| matches!(
+            c,
+            GroupChange::InviteLinkAccess(AccessRequired::Administrator)
+        )));
+        assert!(has(&|c| matches!(c, GroupChange::InviteLinkPassword(_))));
+        assert!(has(
+            &|c| matches!(c, GroupChange::Avatar(a) if a.is_empty())
+        ));
     }
 }
