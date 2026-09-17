@@ -296,8 +296,8 @@ impl StorageService {
             .send()
             .await?;
 
-        // Must precede `service_error_for_status`, which maps CONFLICT to
-        // MismatchedDevices and would try to parse this protobuf body as JSON.
+        // Read here rather than through an `error_mapper!`, because the conflict
+        // belongs to `StorageServiceError`, not to `ServiceError`.
         //
         // The status is the whole signal. The body holds the server's current manifest,
         // but it is deliberately not read: see `StorageServiceError::Conflict`.

@@ -7,7 +7,8 @@ use uuid::Uuid;
 use crate::configuration::Endpoint;
 
 use super::{
-    response::SignalServiceResponse, HttpAuthOverride, PushService, ServiceError,
+    response::SignalServiceResponse, HttpAuthOverride, PushService,
+    ServiceError,
 };
 
 #[derive(Debug, Serialize, Default)]
