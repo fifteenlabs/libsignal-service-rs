@@ -28,7 +28,7 @@ pub(crate) mod response;
 pub use account::*;
 pub use cdn::*;
 pub use error::*;
-pub(crate) use response::{ReqwestExt, SignalServiceResponse};
+pub(crate) use response::SignalServiceResponse;
 
 /// Map a rejected websocket-upgrade handshake to a typed `ServiceError`.
 ///

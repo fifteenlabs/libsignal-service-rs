@@ -14,6 +14,14 @@ use serde::Deserialize;
 use tracing::{debug, trace};
 use url::Url;
 
+use super::response::error_mapper;
+use crate::{
+    configuration::Endpoint, prelude::AttachmentIdentifier,
+    proto::AttachmentPointer, push_service::HttpAuthOverride,
+};
+
+use super::{response::SignalServiceResponse, PushService, ServiceError};
+
 // Mirrors JavaScript's encodeURIComponent: encode everything except
 // A-Za-z0-9 and the unreserved characters - _ . ! ~ * ' ( )
 const ENCODE_URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -26,13 +34,6 @@ const ENCODE_URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'\'')
     .remove(b'(')
     .remove(b')');
-
-use crate::{
-    configuration::Endpoint, prelude::AttachmentIdentifier,
-    proto::AttachmentPointer, push_service::HttpAuthOverride,
-};
-
-use super::{response::ReqwestExt, PushService, ServiceError};
 
 #[derive(Debug, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -72,6 +73,14 @@ pub struct ResumeInfo {
 pub struct AttachmentDownload<R> {
     pub stream: R,
     pub content_length: Option<u64>,
+}
+
+// Signal-Server: controllers/AttachmentControllerV4.java:102
+// (GET /v4/attachments/form/upload)
+error_mapper! {
+    get_attachment_upload_form_errors:
+        // 413: attachment too large, AttachmentControllerV4.java:111
+        PAYLOAD_TOO_LARGE => AttachmentTooLarge,
 }
 
 impl PushService {
@@ -247,7 +256,7 @@ impl PushService {
         )?
         .send()
         .await?
-        .service_error_for_status()
+        .service_error_for_status_with(get_attachment_upload_form_errors)
         .await?
         .json()
         .await

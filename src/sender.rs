@@ -355,7 +355,7 @@ where
     pub async fn send_message(
         &mut self,
         recipient: &ServiceId,
-        mut unidentified_access: Option<UnidentifiedAccess>,
+        mut unidentified_access: Option<&UnidentifiedAccess>,
         message: impl Into<ContentBody>,
         timestamp: u64,
         include_pni_signature: bool,
@@ -405,7 +405,7 @@ where
         let result = self
             .try_send_message(
                 *recipient,
-                unidentified_access.as_ref(),
+                unidentified_access,
                 &content_body,
                 timestamp,
                 include_pni_signature,
@@ -781,8 +781,8 @@ where
                         options: p.options.clone(),
                     });
                 },
-                Err(ServiceError::NotFoundError) => {
-                    tracing::debug!("Not found when sending a message");
+                Err(ServiceError::UnregisteredRecipient) => {
+                    tracing::debug!(?recipient, "recipient is not registered");
                     return Err(MessageSenderError::NotFound {
                         service_id: recipient,
                     });
