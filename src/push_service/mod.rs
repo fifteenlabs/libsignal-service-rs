@@ -28,7 +28,8 @@ pub(crate) mod response;
 pub use account::*;
 pub use cdn::*;
 pub use error::*;
-pub(crate) use response::{ReqwestExt, SignalServiceResponse};
+use response::error_mapper;
+pub(crate) use response::SignalServiceResponse;
 
 /// Map a rejected websocket-upgrade handshake to a typed `ServiceError`.
 ///
@@ -41,7 +42,7 @@ fn map_ws_handshake_error(e: reqwest_websocket::Error) -> ServiceError {
     if let Error::Handshake(HandshakeError::UnexpectedStatusCode(status)) = &e {
         match status.as_u16() {
             401 | 403 => return ServiceError::Unauthorized,
-            499 => return ServiceError::AppExpired,
+            499 => return ServiceError::DeprecatedVersion,
             429 => {
                 return ServiceError::RateLimitExceeded { retry_after: None }
             },
@@ -274,40 +275,52 @@ impl PushService {
         credentials: HttpAuth,
         actions: crate::proto::group_change::Actions,
     ) -> Result<crate::proto::GroupChange, ServiceError> {
-        let response = self
-            .request(
-                Method::PATCH,
-                Endpoint::storage("/v1/groups/"),
-                HttpAuthOverride::Identified(credentials),
-            )?
-            .protobuf(actions)
-            .send()
-            .await?;
-
-        // Must precede `service_error_for_status`: it maps CONFLICT to
-        // MismatchedDevices and FORBIDDEN to Unauthorized, and would try to parse
-        // this endpoint's bodies as the JSON those errors carry.
-        match response.status().as_u16() {
-            409 => return Err(ServiceError::GroupChangeConflict),
-            403 => return Err(ServiceError::GroupChangeForbidden),
-            400 => {
-                let body = response.text().await?;
-                let message =
-                    serde_json::from_str::<GroupChangeRejection>(&body)
-                        .map(|rejection| rejection.message)
-                        .unwrap_or(body);
-                return Err(ServiceError::GroupChangeRejected { message });
-            },
-            _ => {},
-        }
-
-        response.service_error_for_status().await?.protobuf().await
+        self.request(
+            Method::PATCH,
+            Endpoint::storage("/v1/groups/"),
+            HttpAuthOverride::Identified(credentials),
+        )?
+        .protobuf(actions)
+        .send()
+        .await?
+        .service_error_for_status_with(patch_group_errors)
+        .await?
+        .protobuf()
+        .await
     }
 }
 
-#[derive(Deserialize)]
-struct GroupChangeRejection {
-    message: String,
+// Signal-Server: storage-service GroupsController
+// (PATCH /v1/groups/)
+error_mapper! {
+    patch_group_errors:
+        // 400: the change was understood and refused on its merits
+        BAD_REQUEST => fn group_change_rejected,
+        // 403: not permitted by the group's access rules, or not a member
+        FORBIDDEN => GroupChangeForbidden,
+        // 409: `version` is not the group's current revision plus one
+        CONFLICT => GroupChangeConflict,
+}
+
+/// 400: carries the server's own wording when the body is the JSON it usually
+/// is, and the raw body otherwise.
+async fn group_change_rejected<R>(response: R) -> ServiceError
+where
+    R: SignalServiceResponse,
+    ServiceError: From<<R as SignalServiceResponse>::Error>,
+{
+    #[derive(Deserialize)]
+    struct GroupChangeRejection {
+        message: String,
+    }
+    match response.text().await {
+        Ok(body) => ServiceError::GroupChangeRejected {
+            message: serde_json::from_str::<GroupChangeRejection>(&body)
+                .map(|rejection| rejection.message)
+                .unwrap_or(body),
+        },
+        Err(error) => error.into(),
+    }
 }
 
 pub(crate) mod protobuf {

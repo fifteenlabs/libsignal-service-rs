@@ -7,6 +7,7 @@ use zkgroup::profiles::{ProfileKeyCommitment, ProfileKeyVersion};
 use crate::{
     content::ServiceError,
     profile_credential::ProfileCredentialRequest,
+    push_service::response::SignalServiceResponse,
     push_service::AvatarWrite,
     utils::{serde_base64, serde_optional_base64, BASE64_RELAXED},
     websocket::{

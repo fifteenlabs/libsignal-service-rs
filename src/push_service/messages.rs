@@ -7,7 +7,8 @@ use uuid::Uuid;
 use crate::configuration::Endpoint;
 
 use super::{
-    response::ReqwestExt, HttpAuthOverride, PushService, ServiceError,
+    response::SignalServiceResponse, HttpAuthOverride, PushService,
+    ServiceError,
 };
 
 #[derive(Debug, Serialize, Default)]
@@ -23,7 +24,7 @@ impl PushService {
     ///
     /// `token` is the message's `report_spam_token` from the envelope, if any.
     /// Authenticates as the reporting account; the server answers 204 on
-    /// success, which [`ReqwestExt::service_error_for_status`] treats as `Ok`.
+    /// success, which [`SignalServiceResponse::service_error_for_status`] treats as `Ok`.
     pub async fn report_spam(
         &self,
         sender: &ServiceId,
