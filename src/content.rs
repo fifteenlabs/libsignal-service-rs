@@ -30,6 +30,10 @@ pub struct Metadata {
 
     pub client_timestamp: chrono::DateTime<Utc>,
     pub server_timestamp: chrono::DateTime<Utc>,
+    /// When the server delivered the envelope to this device, from the
+    /// websocket frame rather than the envelope. `None` on messages this
+    /// device produced itself and on frames without the header.
+    pub server_delivered_timestamp: Option<chrono::DateTime<Utc>>,
     pub needs_receipt: bool,
     pub unidentified_sender: bool,
     pub was_plaintext: bool,
@@ -61,6 +65,18 @@ impl fmt::Display for Metadata {
 }
 
 impl Metadata {
+    /// How long the server held this envelope before delivering it, the way
+    /// Signal Android computes a call message's age: delivered minus
+    /// accepted, clamped at zero, zero when the delivery time is unknown.
+    /// Never derived from the local clock.
+    pub fn server_delivery_age(&self) -> std::time::Duration {
+        self.server_delivered_timestamp
+            .and_then(|delivered| {
+                (delivered - self.server_timestamp).to_std().ok()
+            })
+            .unwrap_or_default()
+    }
+
     pub(crate) fn protocol_address(
         &self,
     ) -> Result<ProtocolAddress, libsignal_core::InvalidDeviceId> {
@@ -265,3 +281,45 @@ impl_from_for_sync_message!(DeviceNameChange);
 impl_from_for_sync_message!(AttachmentBackfillRequest);
 impl_from_for_sync_message!(AttachmentBackfillResponse);
 impl_from_for_sync_message!(UsernameChange);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::push_service::DEFAULT_DEVICE_ID;
+    use chrono::TimeDelta;
+    use std::time::Duration;
+
+    fn metadata(delivered_after: Option<TimeDelta>) -> Metadata {
+        let accepted =
+            chrono::DateTime::from_timestamp_millis(1_700_000_000_000).unwrap();
+        let aci = ServiceId::Aci(Uuid::nil().into());
+        Metadata {
+            sender: aci,
+            destination: aci,
+            sender_device: *DEFAULT_DEVICE_ID,
+            pni_verified: None,
+            client_timestamp: accepted,
+            server_timestamp: accepted,
+            server_delivered_timestamp: delivered_after
+                .map(|delta| accepted + delta),
+            needs_receipt: false,
+            unidentified_sender: false,
+            was_plaintext: false,
+            server_guid: None,
+            report_spam_token: None,
+        }
+    }
+
+    #[test]
+    fn delivery_age_is_the_time_spent_in_the_queue() {
+        let metadata = metadata(Some(TimeDelta::seconds(90)));
+        assert_eq!(metadata.server_delivery_age(), Duration::from_secs(90));
+    }
+
+    #[test]
+    fn delivery_age_is_zero_when_unknown_or_skewed() {
+        assert_eq!(metadata(None).server_delivery_age(), Duration::ZERO);
+        let skewed = metadata(Some(TimeDelta::seconds(-5)));
+        assert_eq!(skewed.server_delivery_age(), Duration::ZERO);
+    }
+}

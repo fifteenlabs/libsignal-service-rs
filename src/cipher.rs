@@ -147,6 +147,7 @@ where
     pub async fn open_envelope<R: Rng + CryptoRng>(
         &mut self,
         envelope: &Envelope,
+        server_delivered_timestamp: Option<chrono::DateTime<chrono::Utc>>,
         csprng: &mut R,
     ) -> Result<Option<Content>, ServiceError> {
         let local_service: ServiceId =
@@ -154,7 +155,9 @@ where
                 .expect("valid protocol address name");
 
         if envelope.content.is_some() {
-            let plaintext = self.decrypt(envelope, csprng).await?;
+            let plaintext = self
+                .decrypt(envelope, server_delivered_timestamp, csprng)
+                .await?;
             let was_plaintext = plaintext.metadata.was_plaintext;
 
             tracing::Span::current()
@@ -320,6 +323,7 @@ where
     async fn decrypt<R: Rng + CryptoRng>(
         &mut self,
         envelope: &Envelope,
+        server_delivered_timestamp: Option<chrono::DateTime<chrono::Utc>>,
         csprng: &mut R,
     ) -> Result<Plaintext, ServiceError> {
         let local_service: ServiceId =
@@ -617,6 +621,7 @@ where
             sender_device: parts.sender_device,
             client_timestamp: client_timestamp?,
             server_timestamp: server_timestamp?,
+            server_delivered_timestamp,
             needs_receipt: parts.needs_receipt,
             unidentified_sender: parts.unidentified_sender,
             was_plaintext: parts.was_plaintext,
