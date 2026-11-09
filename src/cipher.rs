@@ -211,8 +211,8 @@ where
                 };
                 tracing::warn!(
                     ?envelope,
-                    "Received a decryption error message: {}.",
-                    String::from_utf8_lossy(dme)
+                    len = dme.len(),
+                    "Received a decryption error message."
                 );
             }
 
