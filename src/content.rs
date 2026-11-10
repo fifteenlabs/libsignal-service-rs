@@ -34,6 +34,10 @@ pub struct Metadata {
     /// websocket frame rather than the envelope. `None` on messages this
     /// device produced itself and on frames without the header.
     pub server_delivered_timestamp: Option<chrono::DateTime<Utc>>,
+    /// Whether the sender marked the envelope as timely. The protocol
+    /// defaults to urgent, so this is `true` unless the sender opted out,
+    /// as Signal clients do for ICE updates and typing indicators.
+    pub urgent: bool,
     pub needs_receipt: bool,
     pub unidentified_sender: bool,
     pub was_plaintext: bool,
@@ -302,6 +306,7 @@ mod tests {
             server_timestamp: accepted,
             server_delivered_timestamp: delivered_after
                 .map(|delta| accepted + delta),
+            urgent: true,
             needs_receipt: false,
             unidentified_sender: false,
             was_plaintext: false,

@@ -341,6 +341,7 @@ where
 
         let server_guid = envelope.parse_server_guid();
         let report_spam_token = envelope.report_spam_token.clone();
+        let urgent = envelope.urgent();
 
         let Some(destination_service_id) =
             envelope.parse_destination_service_id()
@@ -622,6 +623,7 @@ where
             client_timestamp: client_timestamp?,
             server_timestamp: server_timestamp?,
             server_delivered_timestamp,
+            urgent,
             needs_receipt: parts.needs_receipt,
             unidentified_sender: parts.unidentified_sender,
             was_plaintext: parts.was_plaintext,
