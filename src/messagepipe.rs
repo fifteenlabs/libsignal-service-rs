@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use futures::{
     channel::{
         mpsc::{self, Sender},
@@ -23,7 +24,16 @@ use crate::{
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum Incoming {
-    Envelope(Envelope),
+    /// One queued envelope. `server_delivered_timestamp` is the frame's
+    /// `X-Signal-Timestamp`: when the server handed this envelope over, as
+    /// opposed to `Envelope::server_timestamp`, when it accepted it. Their
+    /// difference is how long the message sat in the queue, which call
+    /// signalling needs to expire stale offers. `None` when the header is
+    /// missing; treat that as "just delivered".
+    Envelope {
+        envelope: Envelope,
+        server_delivered_timestamp: Option<DateTime<Utc>>,
+    },
     QueueEmpty,
     /// Terminal item: the identified websocket closed. Carries the typed reason
     /// so the consumer can classify the drop (unlink / connected-elsewhere /
@@ -98,7 +108,12 @@ impl MessagePipe {
                     reason: "request without body.",
                 });
             };
-            Some(Incoming::Envelope(Envelope::decode(body.as_slice())?))
+            Some(Incoming::Envelope {
+                envelope: Envelope::decode(body.as_slice())?,
+                server_delivered_timestamp: server_delivered_timestamp(
+                    &request.headers,
+                ),
+            })
         } else if request.is_queue_empty() {
             Some(Incoming::QueueEmpty)
         } else {
@@ -128,5 +143,50 @@ impl MessagePipe {
 
         let combined = futures::stream::select(stream, runner.into_stream());
         combined.filter_map(|x| async { x })
+    }
+}
+
+/// The `X-Signal-Timestamp` header of a message frame, as the server writes
+/// it: milliseconds since the epoch. Header names are matched
+/// case-insensitively because the proto carries them as free-form
+/// `Name:Value` strings.
+fn server_delivered_timestamp(headers: &[String]) -> Option<DateTime<Utc>> {
+    headers.iter().find_map(|header| {
+        let (name, value) = header.split_once(':')?;
+        if !name.trim().eq_ignore_ascii_case("x-signal-timestamp") {
+            return None;
+        }
+        let millis: i64 = value.trim().parse().ok()?;
+        DateTime::from_timestamp_millis(millis)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_the_delivery_timestamp_header() {
+        let headers = vec![
+            "Content-Type:application/octet-stream".to_string(),
+            "x-signal-timestamp: 1700000000123".to_string(),
+        ];
+        assert_eq!(
+            server_delivered_timestamp(&headers),
+            DateTime::from_timestamp_millis(1_700_000_000_123)
+        );
+    }
+
+    #[test]
+    fn missing_or_malformed_header_is_none() {
+        assert_eq!(server_delivered_timestamp(&[]), None);
+        assert_eq!(
+            server_delivered_timestamp(&["X-Signal-Timestamp:soon".into()]),
+            None
+        );
+        assert_eq!(
+            server_delivered_timestamp(&["X-Signal-Timestamp".into()]),
+            None
+        );
     }
 }

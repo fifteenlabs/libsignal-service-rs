@@ -53,6 +53,11 @@ pub struct OutgoingPushMessages {
     pub timestamp: u64,
     pub messages: Vec<OutgoingPushMessage>,
     pub online: bool,
+    /// Whether the server may wake the recipient's devices with a push.
+    /// Signal clients send offers and hangups urgent and ICE updates not.
+    /// The server treats an absent field as `true`, so `true` is the
+    /// behaviour-preserving default.
+    pub urgent: bool,
 }
 
 #[derive(serde::Deserialize, Debug)]
@@ -352,6 +357,10 @@ where
         skip(self, unidentified_access, message),
         fields(unidentified_access = unidentified_access.is_some(), recipient = recipient.service_id_string()),
     )]
+    // Mirrors Signal-Android's `sendMessage(recipient, access, timestamp,
+    // content, online, ..., urgent)`: each flag is a distinct server-side
+    // delivery hint, and bundling them would only move the list elsewhere.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_message(
         &mut self,
         recipient: &ServiceId,
@@ -360,6 +369,7 @@ where
         timestamp: u64,
         include_pni_signature: bool,
         online: bool,
+        urgent: bool,
     ) -> SendMessageResult {
         let content_body = message.into();
         let message_to_self = recipient == &self.local_aci;
@@ -386,6 +396,7 @@ where
                         timestamp,
                         include_pni_signature,
                         online,
+                        urgent,
                     )
                     .await;
             } else {
@@ -410,6 +421,7 @@ where
                 timestamp,
                 include_pni_signature,
                 online,
+                urgent,
             )
             .await;
 
@@ -440,6 +452,7 @@ where
                     timestamp,
                     false,
                     false,
+                    true,
                 )
                 .await?;
             }
@@ -464,6 +477,7 @@ where
         message: impl Into<ContentBody>,
         timestamp: u64,
         online: bool,
+        urgent: bool,
     ) -> Vec<SendMessageResult> {
         let content_body: ContentBody = message.into();
         let mut results = vec![];
@@ -481,6 +495,7 @@ where
                     timestamp,
                     *include_pni_signature,
                     online,
+                    urgent,
                 )
                 .await;
 
@@ -514,6 +529,7 @@ where
                         timestamp,
                         false, // XXX: maybe the sync device does want a PNI signature?
                         false,
+                        true,
                     )
                     .await
                 {
@@ -592,6 +608,7 @@ where
             OutgoingContent::Plaintext(&plaintext),
             Utc::now().timestamp_millis() as u64,
             false,
+            true,
         )
         .await?;
 
@@ -604,6 +621,7 @@ where
         skip(self, unidentified_access, content_body, recipient),
         fields(unidentified_access = unidentified_access.is_some(), recipient = recipient.service_id_string()),
     )]
+    #[allow(clippy::too_many_arguments)]
     async fn try_send_message(
         &mut self,
         recipient: ServiceId,
@@ -612,6 +630,7 @@ where
         timestamp: u64,
         include_pni_signature: bool,
         online: bool,
+        urgent: bool,
     ) -> SendMessageResult {
         use prost::Message;
 
@@ -628,6 +647,7 @@ where
             OutgoingContent::Encrypted(&content_bytes),
             timestamp,
             online,
+            urgent,
         )
         .await
     }
@@ -646,6 +666,7 @@ where
         content: OutgoingContent<'_>,
         timestamp: u64,
         online: bool,
+        urgent: bool,
     ) -> SendMessageResult {
         trace!("trying to send a message");
 
@@ -683,6 +704,7 @@ where
                 timestamp,
                 messages,
                 online,
+                urgent,
             };
 
             let send = if let Some(unidentified) = &unidentified_access {
@@ -883,7 +905,7 @@ where
         };
 
         let ts = Utc::now().timestamp_millis() as u64;
-        self.send_message(recipient, None, msg, ts, false, false)
+        self.send_message(recipient, None, msg, ts, false, false, true)
             .await?;
 
         Ok(())
@@ -907,6 +929,7 @@ where
                 timestamp,
                 false,
                 false,
+                true,
             )
             .await?;
         }
@@ -1222,5 +1245,24 @@ where
             })),
             ..SyncMessage::with_padding(&mut rng())
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn urgent_reaches_the_wire_under_its_own_name() {
+        let messages = OutgoingPushMessages {
+            destination: ServiceId::Aci(uuid::Uuid::nil().into()),
+            timestamp: 1,
+            messages: vec![],
+            online: false,
+            urgent: false,
+        };
+        let json = serde_json::to_string(&messages).unwrap();
+        assert!(json.contains(r#""urgent":false"#), "{json}");
+        assert!(json.contains(r#""online":false"#), "{json}");
     }
 }
