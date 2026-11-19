@@ -47,6 +47,14 @@ pub struct AttachmentV2UploadAttributes {
     signature: String,
 }
 
+impl AttachmentV2UploadAttributes {
+    /// Where the upload lands. For a profile avatar, this is the path the
+    /// profile then names as its avatar.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentUploadForm {
@@ -591,5 +599,32 @@ impl PushService {
             incremental_digest: None,
             incremental_mac_chunk_size: 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AttachmentV2UploadAttributes;
+
+    #[test]
+    fn the_avatar_upload_form_parses() {
+        // `ProfileAvatarUploadAttributes`, as Signal-Server returns it from a
+        // profile write that sets a new avatar.
+        let form: AttachmentV2UploadAttributes = serde_json::from_str(
+            r#"{
+                "key": "profiles/aBcD",
+                "credential": "AKIA/20261119/us-east-1/s3/aws4_request",
+                "acl": "private",
+                "algorithm": "AWS4-HMAC-SHA256",
+                "date": "20261119T120000Z",
+                "policy": "eyJleHBpcmF0aW9uIjoiIn0=",
+                "signature": "abc123"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(form.key(), "profiles/aBcD");
+        assert_eq!(form.acl, "private");
+        assert_eq!(form.signature, "abc123");
     }
 }

@@ -84,6 +84,10 @@ pub enum ProfileManagerError {
     ServiceError(#[from] ServiceError),
     #[error(transparent)]
     ProfileCipherError(#[from] ProfileCipherError),
+    #[error("reading the avatar failed: {0}")]
+    AvatarRead(#[source] std::io::Error),
+    #[error("the server took a new avatar but sent no form to upload it with")]
+    MissingAvatarUploadForm,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -565,6 +569,19 @@ impl AccountManager {
     ) -> Result<Option<String>, ProfileManagerError> {
         let profile_key =
             self.profile_key.expect("set profile key in AccountManager");
+
+        // The server keeps only what a write sends. Read the fields we don't
+        // edit (payment address, phone number sharing) so they go back as is.
+        let current = match self
+            .websocket
+            .retrieve_profile_by_id(aci, Some(profile_key))
+            .await
+        {
+            Ok(profile) => Some(profile),
+            Err(ServiceError::NotFoundError) => None,
+            Err(e) => return Err(e.into()),
+        };
+
         let profile_cipher = ProfileCipher::new(profile_key);
 
         // Profile encryption
@@ -573,29 +590,56 @@ impl AccountManager {
         let about = profile_cipher.encrypt_about(about, csprng)?;
         let about_emoji = about_emoji.unwrap_or_default();
         let about_emoji = profile_cipher.encrypt_emoji(about_emoji, csprng)?;
-
-        // If avatar -> upload
-        if matches!(avatar, AvatarWrite::NewAvatar(_)) {
-            // FIXME ProfileCipherOutputStream.java
-            // It's just AES GCM, but a bit of work to decently implement it with a stream.
-            unimplemented!("Setting avatar requires ProfileCipherStream")
-        }
+        let avatar = match avatar {
+            AvatarWrite::NewAvatar(reader) => {
+                let mut bytes = Vec::new();
+                reader
+                    .read_to_end(&mut bytes)
+                    .map_err(ProfileManagerError::AvatarRead)?;
+                AvatarWrite::NewAvatar(
+                    profile_cipher.encrypt_avatar(bytes, csprng)?,
+                )
+            },
+            AvatarWrite::RetainAvatar => AvatarWrite::RetainAvatar,
+            AvatarWrite::NoAvatar => AvatarWrite::NoAvatar,
+        };
 
         let profile_key = profile_cipher.into_inner();
         let commitment = profile_key.get_commitment(aci);
         let profile_key_version = profile_key.get_profile_key_version(aci);
 
-        Ok(self
+        let upload_form = self
             .websocket
-            .write_profile::<C, S>(
+            .write_profile(
                 &profile_key_version,
                 &name,
                 &about,
                 &about_emoji,
+                current.as_ref(),
                 &commitment,
-                avatar,
+                &avatar,
             )
-            .await?)
+            .await?;
+
+        match (avatar, upload_form) {
+            (AvatarWrite::NewAvatar(ciphertext), Some(form)) => {
+                let avatar_path = form.key().to_owned();
+                // cdn0's root: the form's `key` names the object.
+                self.service
+                    .upload_to_cdn0(
+                        "/",
+                        form,
+                        "file".to_owned(),
+                        std::io::Cursor::new(ciphertext),
+                    )
+                    .await?;
+                Ok(Some(avatar_path))
+            },
+            (AvatarWrite::NewAvatar(_), None) => {
+                Err(ProfileManagerError::MissingAvatarUploadForm)
+            },
+            (AvatarWrite::RetainAvatar | AvatarWrite::NoAvatar, _) => Ok(None),
+        }
     }
 
     /// Set profile attributes

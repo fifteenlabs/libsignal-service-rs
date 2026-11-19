@@ -90,8 +90,17 @@ impl ProfileCipher {
         padding_brackets: &[usize],
         csprng: &mut R,
     ) -> Result<Vec<u8>, ProfileCipherError> {
-        let _len = pad_plaintext(&mut bytes, padding_brackets)?;
+        pad_plaintext(&mut bytes, padding_brackets)?;
+        self.encrypt(bytes, csprng)
+    }
 
+    /// AES-256-GCM under the profile key: a random 12-byte nonce, then the
+    /// ciphertext and its tag. No associated data.
+    fn encrypt<R: RngCore + CryptoRng>(
+        &self,
+        mut bytes: Vec<u8>,
+        csprng: &mut R,
+    ) -> Result<Vec<u8>, ProfileCipherError> {
         let cipher = Aes256Gcm::new(&self.profile_key.get_bytes().into());
         let mut nonce = [0u8; 12];
         csprng.fill_bytes(&mut nonce);
@@ -169,6 +178,19 @@ impl ProfileCipher {
         bytes: &[u8],
     ) -> Result<Vec<u8>, ProfileCipherError> {
         self.decrypt_and_unpad(bytes)
+    }
+
+    /// Encrypt an avatar for upload.
+    ///
+    /// Unpadded, as Signal-Desktop uploads it. [`Self::decrypt_avatar`] strips
+    /// trailing zero bytes, which an encoded image never ends in (a JPEG ends
+    /// `FF D9`).
+    pub fn encrypt_avatar<R: RngCore + CryptoRng>(
+        &self,
+        avatar: Vec<u8>,
+        csprng: &mut R,
+    ) -> Result<Vec<u8>, ProfileCipherError> {
+        self.encrypt(avatar, csprng)
     }
 
     pub fn encrypt_name<'inp, R: RngCore + CryptoRng>(
@@ -313,5 +335,20 @@ mod tests {
 
             assert_eq!(decrypted, emoji);
         }
+    }
+
+    #[test]
+    fn roundtrip_avatar() {
+        let mut rng = rand::rng();
+        let profile_key = ProfileKey::generate(rng.random());
+        let cipher = ProfileCipher::new(profile_key);
+        let jpeg =
+            [&[0xFF, 0xD8, 0xFF, 0xE0][..], &[0; 64], &[0xFF, 0xD9]].concat();
+
+        let encrypted = cipher.encrypt_avatar(jpeg.clone(), &mut rng).unwrap();
+
+        // Nonce and tag around the unpadded image, as Signal-Desktop uploads it.
+        assert_eq!(encrypted.len(), 12 + jpeg.len() + 16);
+        assert_eq!(cipher.decrypt_avatar(&encrypted).unwrap(), jpeg);
     }
 }
