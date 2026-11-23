@@ -8,7 +8,7 @@ use crate::{
     content::ServiceError,
     profile_credential::ProfileCredentialRequest,
     push_service::response::SignalServiceResponse,
-    push_service::AvatarWrite,
+    push_service::{AttachmentV2UploadAttributes, AvatarWrite},
     utils::{serde_base64, serde_optional_base64, BASE64_RELAXED},
     websocket::{
         self, account::DeviceCapabilities, SignalWebSocket, WebSocketType,
@@ -59,10 +59,15 @@ pub struct SignalServiceProfile {
     pub about: Option<Vec<u8>>,
     #[serde(default, with = "serde_optional_base64")]
     pub about_emoji: Option<Vec<u8>>,
-
-    // TODO: not sure whether this is via optional_base64
-    // #[serde(default, with = "serde_optional_base64")]
-    // pub payment_address: Option<Vec<u8>>,
+    /// Encrypted MobileCoin payment address. Never decrypted here: a profile
+    /// write sends these bytes back, because the server clears what a write
+    /// leaves out.
+    #[serde(default, with = "serde_optional_base64")]
+    pub payment_address: Option<Vec<u8>>,
+    /// Encrypted phone-number-sharing flag, carried over like
+    /// `payment_address`.
+    #[serde(default, with = "serde_optional_base64")]
+    pub phone_number_sharing: Option<Vec<u8>>,
     pub avatar: Option<String>,
     pub unidentified_access: Option<String>,
 
@@ -87,6 +92,16 @@ struct SignalServiceProfileWrite<'s> {
     about: &'s [u8],
     #[serde(with = "serde_base64")]
     about_emoji: &'s [u8],
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "serde_optional_base64"
+    )]
+    payment_address: Option<&'s [u8]>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "serde_optional_base64"
+    )]
+    phone_number_sharing: Option<&'s [u8]>,
     avatar: bool,
     same_avatar: bool,
     #[serde(with = "serde_base64")]
@@ -129,69 +144,76 @@ impl SignalWebSocket<websocket::Identified> {
             .await
     }
 
-    /// Writes a profile and returns the avatar URL, if one was provided.
+    /// Writes a profile. For a new avatar, returns the form to upload it with.
     ///
-    /// The name, about and emoji fields are encrypted with an [`ProfileCipher`][struct@crate::profile_cipher::ProfileCipher].
+    /// The name, about and emoji fields are encrypted with an [`ProfileCipher`][struct@crate::profile_cipher::ProfileCipher],
+    /// and a new avatar's bytes are uploaded separately with the returned form.
     /// See [`AccountManager`][struct@crate::AccountManager] for a convenience method.
     ///
+    /// The write replaces the whole profile, and the server clears every field it
+    /// leaves out, so `current`'s payment address and phone number sharing go
+    /// back exactly as the server holds them.
+    ///
     /// Java equivalent: `writeProfile`
-    pub async fn write_profile<'s, C, S>(
+    #[allow(clippy::too_many_arguments)]
+    pub async fn write_profile(
         &mut self,
         version: &ProfileKeyVersion,
         name: &[u8],
         about: &[u8],
         emoji: &[u8],
+        current: Option<&SignalServiceProfile>,
         commitment: &ProfileKeyCommitment,
-        avatar: AvatarWrite<&mut C>,
-    ) -> Result<Option<String>, ServiceError>
-    where
-        C: std::io::Read + Send + 's,
-        S: AsRef<str>,
-    {
+        avatar: &AvatarWrite<Vec<u8>>,
+    ) -> Result<Option<AttachmentV2UploadAttributes>, ServiceError> {
         let version: &str = version.as_ref();
         let commitment = bincode::serialize(commitment)?;
-
-        let command = SignalServiceProfileWrite {
+        let command = profile_write(
             version,
             name,
             about,
-            about_emoji: emoji,
-            avatar: !matches!(avatar, AvatarWrite::NoAvatar),
-            same_avatar: matches!(avatar, AvatarWrite::RetainAvatar),
-            commitment: &commitment,
-        };
+            emoji,
+            current,
+            &commitment,
+            avatar,
+        );
 
-        // XXX this should  be a struct; cfr ProfileAvatarUploadAttributes
-        let upload_url: Result<String, _> = self
+        let response = self
             .http_request(Method::PUT, "/v1/profile")?
             .send_json(&command)
             .await?
             .service_error_for_status()
-            .await?
-            .json()
-            .await;
+            .await?;
 
-        match (upload_url, avatar) {
-            (_url, AvatarWrite::NewAvatar(_avatar)) => {
-                // FIXME
-                unreachable!("Uploading avatar unimplemented");
-            },
-            // FIXME cleanup when #54883 is stable and MSRV:
-            // or-patterns syntax is experimental
-            // see issue #54883 <https://github.com/rust-lang/rust/issues/54883> for more information
-            (Err(_), AvatarWrite::RetainAvatar)
-            | (Err(_), AvatarWrite::NoAvatar) => {
-                // OWS sends an empty string when there's no attachment
-                Ok(None)
-            },
-            (Ok(_resp), AvatarWrite::RetainAvatar)
-            | (Ok(_resp), AvatarWrite::NoAvatar) => {
-                tracing::warn!(
-                    "No avatar supplied but got avatar upload URL. Ignoring"
-                );
-                Ok(None)
-            },
+        // The server answers a new avatar with its upload form, and anything
+        // else with an empty body.
+        if !matches!(avatar, AvatarWrite::NewAvatar(_)) {
+            return Ok(None);
         }
+        Ok(Some(response.json().await?))
+    }
+}
+
+fn profile_write<'s>(
+    version: &'s str,
+    name: &'s [u8],
+    about: &'s [u8],
+    emoji: &'s [u8],
+    current: Option<&'s SignalServiceProfile>,
+    commitment: &'s [u8],
+    avatar: &AvatarWrite<Vec<u8>>,
+) -> SignalServiceProfileWrite<'s> {
+    SignalServiceProfileWrite {
+        version,
+        name,
+        about,
+        about_emoji: emoji,
+        payment_address: current.and_then(|p| p.payment_address.as_deref()),
+        phone_number_sharing: current
+            .and_then(|p| p.phone_number_sharing.as_deref()),
+        avatar: !matches!(avatar, AvatarWrite::NoAvatar),
+        same_avatar: matches!(avatar, AvatarWrite::RetainAvatar),
+        commitment,
     }
 }
 
@@ -338,5 +360,63 @@ mod tests {
         );
 
         assert_eq!(profile_key_credential_path(&request), expected);
+    }
+
+    fn written(
+        current: Option<&SignalServiceProfile>,
+        avatar: &AvatarWrite<Vec<u8>>,
+    ) -> serde_json::Value {
+        serde_json::to_value(profile_write(
+            "ab",
+            b"name",
+            b"about",
+            b"emoji",
+            current,
+            b"commitment",
+            avatar,
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_profile_write_carries_over_the_fields_it_does_not_edit() {
+        let current: SignalServiceProfile =
+            serde_json::from_value(serde_json::json!({
+                "paymentAddress": "cGF5bWVudA==",
+                "phoneNumberSharing": "c2hhcmluZw==",
+                "capabilities": {},
+            }))
+            .unwrap();
+
+        let json = written(Some(&current), &AvatarWrite::RetainAvatar);
+
+        assert_eq!(json["paymentAddress"], "cGF5bWVudA==");
+        assert_eq!(json["phoneNumberSharing"], "c2hhcmluZw==");
+    }
+
+    #[test]
+    fn a_profile_write_leaves_out_what_the_server_never_had() {
+        let json = written(None, &AvatarWrite::RetainAvatar);
+
+        assert!(json.get("paymentAddress").is_none());
+        assert!(json.get("phoneNumberSharing").is_none());
+    }
+
+    #[test]
+    fn a_profile_write_says_which_avatar_change_it_is() {
+        let flags = |avatar| {
+            let json = written(None, &avatar);
+            (json["avatar"].clone(), json["sameAvatar"].clone())
+        };
+
+        assert_eq!(
+            flags(AvatarWrite::RetainAvatar),
+            (true.into(), true.into())
+        );
+        assert_eq!(
+            flags(AvatarWrite::NewAvatar(vec![1])),
+            (true.into(), false.into())
+        );
+        assert_eq!(flags(AvatarWrite::NoAvatar), (false.into(), false.into()));
     }
 }

@@ -35,7 +35,7 @@ const ENCODE_URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'(')
     .remove(b')');
 
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentV2UploadAttributes {
     key: String,
@@ -45,6 +45,14 @@ pub struct AttachmentV2UploadAttributes {
     date: String,
     policy: String,
     signature: String,
+}
+
+impl AttachmentV2UploadAttributes {
+    /// Where the upload lands. For a profile avatar, this is the path the
+    /// profile then names as its avatar.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -479,7 +487,9 @@ impl PushService {
             .request(
                 Method::POST,
                 Endpoint::cdn(0, path),
-                HttpAuthOverride::NoOverride,
+                // The form's policy is the authorisation; the account's
+                // credentials must not reach the CDN.
+                HttpAuthOverride::Unidentified,
             )?
             .multipart(form)
             .send()
@@ -591,5 +601,32 @@ impl PushService {
             incremental_digest: None,
             incremental_mac_chunk_size: 0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AttachmentV2UploadAttributes;
+
+    #[test]
+    fn the_avatar_upload_form_parses() {
+        // `ProfileAvatarUploadAttributes`, as Signal-Server returns it from a
+        // profile write that sets a new avatar.
+        let form: AttachmentV2UploadAttributes = serde_json::from_str(
+            r#"{
+                "key": "profiles/aBcD",
+                "credential": "AKIA/20261119/us-east-1/s3/aws4_request",
+                "acl": "private",
+                "algorithm": "AWS4-HMAC-SHA256",
+                "date": "20261119T120000Z",
+                "policy": "eyJleHBpcmF0aW9uIjoiIn0=",
+                "signature": "abc123"
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(form.key(), "profiles/aBcD");
+        assert_eq!(form.acl, "private");
+        assert_eq!(form.signature, "abc123");
     }
 }
