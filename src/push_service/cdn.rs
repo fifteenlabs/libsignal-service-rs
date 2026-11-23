@@ -35,7 +35,7 @@ const ENCODE_URI_COMPONENT: &AsciiSet = &NON_ALPHANUMERIC
     .remove(b'(')
     .remove(b')');
 
-#[derive(Debug, serde::Deserialize, Default)]
+#[derive(Debug, Clone, serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentV2UploadAttributes {
     key: String,
@@ -487,7 +487,9 @@ impl PushService {
             .request(
                 Method::POST,
                 Endpoint::cdn(0, path),
-                HttpAuthOverride::NoOverride,
+                // The form's policy is the authorisation; the account's
+                // credentials must not reach the CDN.
+                HttpAuthOverride::Unidentified,
             )?
             .multipart(form)
             .send()

@@ -30,7 +30,8 @@ use crate::proto::{DeviceName, SyncMessage};
 use crate::provisioning::{generate_registration_id, ProvisioningSecrets};
 use crate::push_service::response::{device_limit_reached, error_mapper};
 use crate::push_service::{
-    AvatarWrite, HttpAuthOverride, SignalServiceResponse, DEFAULT_DEVICE_ID,
+    AttachmentV2UploadAttributes, AvatarWrite, HttpAuthOverride,
+    SignalServiceResponse, DEFAULT_DEVICE_ID,
 };
 use crate::sender::OutgoingPushMessage;
 use crate::service_address::ServiceIdExt;
@@ -88,6 +89,8 @@ pub enum ProfileManagerError {
     AvatarRead(#[source] std::io::Error),
     #[error("the server took a new avatar but sent no form to upload it with")]
     MissingAvatarUploadForm,
+    #[error("uploading the avatar failed: {0}")]
+    AvatarUpload(#[source] ServiceError),
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -624,22 +627,69 @@ impl AccountManager {
         match (avatar, upload_form) {
             (AvatarWrite::NewAvatar(ciphertext), Some(form)) => {
                 let avatar_path = form.key().to_owned();
-                // cdn0's root: the form's `key` names the object.
-                self.service
-                    .upload_to_cdn0(
-                        "/",
-                        form,
-                        "file".to_owned(),
-                        std::io::Cursor::new(ciphertext),
+                let Err(e) = self.upload_avatar(form, &ciphertext).await else {
+                    return Ok(Some(avatar_path));
+                };
+                // The profile already names the new path, and the server
+                // deleted the old avatar when it took the write. Point the
+                // profile at no avatar, so contacts see the default one rather
+                // than a path with nothing behind it.
+                if let Err(clear) = self
+                    .websocket
+                    .write_profile(
+                        &profile_key_version,
+                        &name,
+                        &about,
+                        &about_emoji,
+                        current.as_ref(),
+                        &commitment,
+                        &AvatarWrite::NoAvatar,
                     )
-                    .await?;
-                Ok(Some(avatar_path))
+                    .await
+                {
+                    tracing::warn!(
+                        %clear,
+                        "avatar upload failed and clearing the avatar failed too"
+                    );
+                }
+                Err(ProfileManagerError::AvatarUpload(e))
             },
             (AvatarWrite::NewAvatar(_), None) => {
                 Err(ProfileManagerError::MissingAvatarUploadForm)
             },
             (AvatarWrite::RetainAvatar | AvatarWrite::NoAvatar, _) => Ok(None),
         }
+    }
+
+    /// Post an encrypted avatar to cdn0 with the form a profile write
+    /// returned, trying once more if the first attempt fails.
+    async fn upload_avatar(
+        &mut self,
+        form: AttachmentV2UploadAttributes,
+        ciphertext: &[u8],
+    ) -> Result<(), ServiceError> {
+        // cdn0's root: the form's `key` names the object.
+        let first = self
+            .service
+            .upload_to_cdn0(
+                "/",
+                form.clone(),
+                "file".to_owned(),
+                std::io::Cursor::new(ciphertext),
+            )
+            .await;
+        let Err(e) = first else {
+            return Ok(());
+        };
+        tracing::warn!(%e, "avatar upload failed, retrying once");
+        self.service
+            .upload_to_cdn0(
+                "/",
+                form,
+                "file".to_owned(),
+                std::io::Cursor::new(ciphertext),
+            )
+            .await
     }
 
     /// Set profile attributes

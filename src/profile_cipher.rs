@@ -182,9 +182,10 @@ impl ProfileCipher {
 
     /// Encrypt an avatar for upload.
     ///
-    /// Unpadded, as Signal-Desktop uploads it. [`Self::decrypt_avatar`] strips
-    /// trailing zero bytes, which an encoded image never ends in (a JPEG ends
-    /// `FF D9`).
+    /// Unpadded, as Signal-Desktop uploads it. Every reader strips trailing
+    /// zero bytes on decrypt (Signal-Android pads its avatars with them), so
+    /// the image must be in a format that never ends in one: JPEG ends
+    /// `FF D9`, PNG with its `IEND` checksum.
     pub fn encrypt_avatar<R: RngCore + CryptoRng>(
         &self,
         avatar: Vec<u8>,
