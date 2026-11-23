@@ -90,7 +90,7 @@ pub enum ProfileManagerError {
     #[error("the server took a new avatar but sent no form to upload it with")]
     MissingAvatarUploadForm,
     #[error("uploading the avatar failed: {0}")]
-    AvatarUpload(#[source] ServiceError),
+    AvatarUpload(#[source] Box<ServiceError>),
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -652,7 +652,7 @@ impl AccountManager {
                         "avatar upload failed and clearing the avatar failed too"
                     );
                 }
-                Err(ProfileManagerError::AvatarUpload(e))
+                Err(ProfileManagerError::AvatarUpload(Box::new(e)))
             },
             (AvatarWrite::NewAvatar(_), None) => {
                 Err(ProfileManagerError::MissingAvatarUploadForm)
