@@ -130,7 +130,7 @@ pub enum InvalidKeyError {
 pub fn generate_registration_id<R: rand::Rng + rand::CryptoRng>(
     csprng: &mut R,
 ) -> u32 {
-    csprng.random_range(1..16380)
+    csprng.random_range(1..=16380)
 }
 
 #[derive(Debug, Deserialize)]
