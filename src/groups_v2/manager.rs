@@ -279,7 +279,8 @@ impl<C: CredentialsCache> GroupsManager<C> {
     /// [`GroupOperations::encrypt_group_with_credentials`]; this attaches the zk auth
     /// credential the server requires and performs the write. The response's `group` is
     /// the group as the server stored it, revision 0, encrypted like
-    /// [`fetch_encrypted_group`](Self::fetch_encrypted_group)'s.
+    /// [`fetch_encrypted_group`](Self::fetch_encrypted_group)'s. A success without it
+    /// still created the group: read it back rather than creating it again.
     pub async fn create_group<R: Rng + CryptoRng>(
         &mut self,
         csprng: &mut R,
