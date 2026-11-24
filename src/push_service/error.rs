@@ -98,6 +98,9 @@ pub enum ServiceError {
     #[error("MAC error")]
     MacError,
 
+    #[error("attachment decryption error: {0}")]
+    AttachmentCipher(#[from] crate::attachment_cipher::AttachmentCipherError),
+
     #[error("Protocol error: {0}")]
     SignalProtocolError(#[from] SignalProtocolError),
 

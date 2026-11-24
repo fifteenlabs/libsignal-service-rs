@@ -75,11 +75,13 @@ impl MessageReceiver {
             let mut ciphertext = Vec::new();
             stream.read_to_end(&mut ciphertext).await?;
 
-            let key: [u8; 64] =
-                blob.key().try_into().map_err(|_| ServiceError::MacError)?;
+            let key: [u8; 64] = blob.key().try_into().map_err(|_| {
+                ServiceError::InvalidFrame {
+                    reason: "contacts attachment key is not 64 bytes",
+                }
+            })?;
 
-            decrypt_in_place(key, &mut ciphertext)
-                .map_err(|_| ServiceError::MacError)?;
+            decrypt_in_place(key, &mut ciphertext)?;
 
             Ok(DeviceContactsIterator::new(Bytes::from(ciphertext)))
         } else {
