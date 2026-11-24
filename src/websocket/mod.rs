@@ -280,6 +280,9 @@ impl SignalWebSocketProcess {
             Instant::now() + push_service::KEEPALIVE_TIMEOUT_SECONDS,
             push_service::KEEPALIVE_TIMEOUT_SECONDS,
         );
+        // Bursting the ticks missed while suspended would find the first one's keepalive unanswered.
+        ka_interval
+            .set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         loop {
             futures::select! {
