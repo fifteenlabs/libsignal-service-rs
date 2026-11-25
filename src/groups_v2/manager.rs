@@ -277,18 +277,20 @@ impl<C: CredentialsCache> GroupsManager<C> {
     ///
     /// The caller derives the master key and builds the `Group` with
     /// [`GroupOperations::encrypt_group_with_credentials`]; this attaches the zk auth
-    /// credential the server requires and performs the write. Read the group back with
-    /// [`fetch_encrypted_group`](Self::fetch_encrypted_group) to obtain its canonical state.
+    /// credential the server requires and performs the write. The response's `group` is
+    /// the group as the server stored it, revision 0, encrypted like
+    /// [`fetch_encrypted_group`](Self::fetch_encrypted_group)'s. A success without it
+    /// still created the group: read it back rather than creating it again.
     pub async fn create_group<R: Rng + CryptoRng>(
         &mut self,
         csprng: &mut R,
         master_key_bytes: &[u8],
         group: crate::proto::Group,
-    ) -> Result<(), ServiceError> {
+    ) -> Result<crate::proto::GroupResponse, ServiceError> {
         let authorization =
             self.group_authorization(csprng, master_key_bytes).await?;
         self.identified_push_service
-            .create_group(authorization, group)
+            .put_group(authorization, group)
             .await
     }
 

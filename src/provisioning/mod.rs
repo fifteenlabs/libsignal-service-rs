@@ -48,6 +48,7 @@ pub struct ProvisioningSecrets {
     pub ephemeral_backup_key: Option<[u8; 32]>,
     pub account_entropy_pool: AccountEntropyPool,
     pub media_root_backup_key: Option<[u8; 32]>,
+    pub read_receipts: Option<bool>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -129,7 +130,7 @@ pub enum InvalidKeyError {
 pub fn generate_registration_id<R: rand::Rng + rand::CryptoRng>(
     csprng: &mut R,
 ) -> u32 {
-    csprng.random_range(1..16380)
+    csprng.random_range(1..=16380)
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,8 +198,8 @@ pub async fn link_device<
         )
         .await?;
 
-    let registration_id = csprng.random_range(1..256);
-    let pni_registration_id = csprng.random_range(1..256);
+    let registration_id = generate_registration_id(csprng);
+    let pni_registration_id = generate_registration_id(csprng);
 
     let provisioning_pipe = ProvisioningPipe::from_socket(ws, csprng);
     let provision_stream = provisioning_pipe.stream();

@@ -14,7 +14,8 @@ use reqwest_websocket::Upgrade;
 use serde::{Deserialize, Serialize};
 use tracing::{debug_span, Instrument};
 
-pub const KEEPALIVE_TIMEOUT_SECONDS: Duration = Duration::from_secs(55);
+/// See `WS_KEEP_ALIVE_INTERVAL` in libsignal-net
+pub const KEEPALIVE_TIMEOUT_SECONDS: Duration = Duration::from_secs(30);
 pub static DEFAULT_DEVICE_ID: LazyLock<libsignal_core::DeviceId> =
     LazyLock::new(|| libsignal_core::DeviceId::try_from(1).unwrap());
 
@@ -240,26 +241,27 @@ impl PushService {
     /// Create a group.
     ///
     /// The encrypted `Group` is the complete initial state; the server assigns nothing
-    /// beyond validating the member presentations. The response body is deliberately
-    /// ignored — its shape differs between the v1 endpoint used here and the `v2/groups`
-    /// one Signal-Desktop creates through, and the caller reads the group back rather than
-    /// depending on it.
-    pub(crate) async fn create_group(
+    /// beyond validating the member presentations. The response carries the group exactly
+    /// as the server stored it, so the caller has its canonical state without a second
+    /// request. It is v2, as Signal-Desktop uses: under v1 the server answers with an
+    /// empty body.
+    pub(crate) async fn put_group(
         &mut self,
         credentials: HttpAuth,
         group: crate::proto::Group,
-    ) -> Result<(), ServiceError> {
+    ) -> Result<crate::proto::GroupResponse, ServiceError> {
         self.request(
             Method::PUT,
-            Endpoint::storage("/v1/groups/"),
+            Endpoint::storage("/v2/groups/"),
             HttpAuthOverride::Identified(credentials),
         )?
         .protobuf(group)
         .send()
         .await?
         .service_error_for_status()
-        .await?;
-        Ok(())
+        .await?
+        .protobuf()
+        .await
     }
 
     /// Apply a change-set to a group.
