@@ -91,6 +91,8 @@ pub enum ProfileManagerError {
     MissingAvatarUploadForm,
     #[error("uploading the avatar failed: {0}")]
     AvatarUpload(#[source] Box<ServiceError>),
+    #[error("the profile has no name to write back")]
+    NamelessProfile,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -712,6 +714,63 @@ impl AccountManager {
         self.websocket
             .set_phone_number_discoverability(discoverable)
             .await
+    }
+
+    /// Rewrite our profile with only its phone-number-sharing flag changed,
+    /// as Signal-Desktop does when "Who can see my number" changes.
+    ///
+    /// The flag tells contacts' clients whether to show our number. Every
+    /// other field goes back as the server holds it, still encrypted, so
+    /// nothing has to be decrypted to write it: name, about, emoji, payment
+    /// address, and the avatar, which is kept.
+    ///
+    /// Panics if no `profile_key` was set.
+    pub async fn set_phone_number_sharing<R: Rng + CryptoRng>(
+        &mut self,
+        aci: Aci,
+        sharing: bool,
+        csprng: &mut R,
+    ) -> Result<(), ProfileManagerError> {
+        let profile_key =
+            self.profile_key.expect("set profile key in AccountManager");
+
+        let mut current = self
+            .websocket
+            .retrieve_profile_by_id(aci, Some(profile_key))
+            .await?;
+        // The server takes no profile without a name, and a write is the
+        // whole profile: there is nothing to keep when the version holds none.
+        let name = current
+            .name
+            .take()
+            .ok_or(ProfileManagerError::NamelessProfile)?;
+        let about = current.about.take().unwrap_or_default();
+        let about_emoji = current.about_emoji.take().unwrap_or_default();
+
+        // Signal-Desktop's `keepAvatar` also says "no avatar" when there is none.
+        let avatar = if current.avatar.is_some() {
+            AvatarWrite::RetainAvatar
+        } else {
+            AvatarWrite::NoAvatar
+        };
+
+        let profile_cipher = ProfileCipher::new(profile_key);
+        current.phone_number_sharing =
+            Some(profile_cipher.encrypt_phone_number_sharing(sharing, csprng)?);
+
+        let profile_key = profile_cipher.into_inner();
+        self.websocket
+            .write_profile(
+                &profile_key.get_profile_key_version(aci),
+                &name,
+                &about,
+                &about_emoji,
+                Some(&current),
+                &profile_key.get_commitment(aci),
+                &avatar,
+            )
+            .await?;
+        Ok(())
     }
 
     /// Replace this device's capabilities, as Signal-Desktop does after linking:

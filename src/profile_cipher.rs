@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 use aes_gcm::{aead::Aead, AeadInOut, Aes256Gcm, KeyInit};
 use rand::{CryptoRng, RngCore};
 use zkgroup::profiles::ProfileKey;
@@ -115,19 +113,27 @@ impl ProfileCipher {
         Ok(concat)
     }
 
+    /// The inverse of [`Self::encrypt`]. A field too short to hold a nonce
+    /// is an error, not a panic: these bytes come from the server.
+    fn decrypt_field(
+        &self,
+        bytes: &[u8],
+    ) -> Result<Vec<u8>, ProfileCipherError> {
+        let (nonce, ciphertext) = bytes
+            .split_first_chunk::<12>()
+            .ok_or(ProfileCipherError::EncryptionError)?;
+        let cipher = Aes256Gcm::new(&self.profile_key.get_bytes().into());
+
+        cipher
+            .decrypt(&(*nonce).into(), ciphertext)
+            .map_err(|_| ProfileCipherError::EncryptionError)
+    }
+
     fn decrypt_and_unpad(
         &self,
         bytes: impl AsRef<[u8]>,
     ) -> Result<Vec<u8>, ProfileCipherError> {
-        let bytes = bytes.as_ref();
-        let nonce: [u8; 12] = bytes[0..12]
-            .try_into()
-            .expect("fixed length nonce material");
-        let cipher = Aes256Gcm::new(&self.profile_key.get_bytes().into());
-
-        let mut plaintext = cipher
-            .decrypt(&nonce.into(), &bytes[12..])
-            .map_err(|_| ProfileCipherError::EncryptionError)?;
+        let mut plaintext = self.decrypt_field(bytes.as_ref())?;
 
         // Unpad
         let len = plaintext
@@ -256,6 +262,31 @@ impl ProfileCipher {
         // XXX This re-allocates.
         Ok(std::str::from_utf8(&plaintext)?.into())
     }
+
+    /// Encrypt the profile's phone-number-sharing flag: one unpadded byte,
+    /// `1` to share with everybody, as Signal-Android's `encryptBoolean` and
+    /// Signal-Desktop's `encryptProfileData` write it.
+    pub fn encrypt_phone_number_sharing<R: RngCore + CryptoRng>(
+        &self,
+        sharing: bool,
+        csprng: &mut R,
+    ) -> Result<Vec<u8>, ProfileCipherError> {
+        self.encrypt(vec![u8::from(sharing)], csprng)
+    }
+
+    /// Read a profile's phone-number-sharing flag. Not unpadded, since a
+    /// `0` byte is the value; any non-zero first byte means sharing, as in
+    /// Signal-Android's `decryptBoolean`.
+    pub fn decrypt_phone_number_sharing(
+        &self,
+        bytes: impl AsRef<[u8]>,
+    ) -> Result<bool, ProfileCipherError> {
+        let plaintext = self.decrypt_field(bytes.as_ref())?;
+        let first = plaintext
+            .first()
+            .ok_or(ProfileCipherError::EncryptionError)?;
+        Ok(*first != 0)
+    }
 }
 
 #[cfg(test)]
@@ -351,5 +382,33 @@ mod tests {
         // Nonce and tag around the unpadded image, as Signal-Desktop uploads it.
         assert_eq!(encrypted.len(), 12 + jpeg.len() + 16);
         assert_eq!(cipher.decrypt_avatar(&encrypted).unwrap(), jpeg);
+    }
+
+    #[test]
+    fn roundtrip_phone_number_sharing() {
+        let mut rng = rand::rng();
+        let profile_key = ProfileKey::generate(rng.random());
+        let cipher = ProfileCipher::new(profile_key);
+
+        for sharing in [true, false] {
+            let encrypted = cipher
+                .encrypt_phone_number_sharing(sharing, &mut rng)
+                .unwrap();
+            // The only size Signal-Server takes for the field besides empty.
+            assert_eq!(encrypted.len(), 29);
+            assert_eq!(
+                cipher.decrypt_phone_number_sharing(&encrypted).unwrap(),
+                sharing
+            );
+        }
+    }
+
+    #[test]
+    fn a_field_shorter_than_its_nonce_is_an_error() {
+        let mut rng = rand::rng();
+        let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
+
+        assert!(cipher.decrypt_phone_number_sharing([0u8; 5]).is_err());
+        assert!(cipher.decrypt_about([0u8; 11]).is_err());
     }
 }
