@@ -703,6 +703,17 @@ impl AccountManager {
         self.websocket.set_account_attributes(attributes).await
     }
 
+    /// Set whether the account can be found by its phone number. Safe from a
+    /// linked device: see [`SignalWebSocket::set_phone_number_discoverability`].
+    pub async fn set_phone_number_discoverability(
+        &mut self,
+        discoverable: bool,
+    ) -> Result<(), ServiceError> {
+        self.websocket
+            .set_phone_number_discoverability(discoverable)
+            .await
+    }
+
     /// Replace this device's capabilities, as Signal-Desktop does after linking:
     /// <https://github.com/signalapp/Signal-Desktop/blob/main/ts/background.preload.ts>
     /// (`registerCapabilities`).

@@ -111,6 +111,17 @@ impl Default for DeviceCapabilities {
 #[cfg(test)]
 mod test {
     #[test]
+    fn phone_number_discoverability_body_is_camel_case() {
+        let body = super::PhoneNumberDiscoverability {
+            discoverable_by_phone_number: false,
+        };
+        assert_eq!(
+            serde_json::to_string(&body).unwrap(),
+            r#"{"discoverableByPhoneNumber":false}"#
+        );
+    }
+
+    #[test]
     fn device_capabilities_serialization_weird_casing() {
         let capabilities = super::DeviceCapabilities::default();
         let json = serde_json::to_string(&capabilities)
@@ -138,6 +149,13 @@ pub struct WhoAmIResponse {
     /// server never sees; only the full `signal.me` link carries it.
     #[serde(default)]
     pub username_link_handle: Option<Uuid>,
+}
+
+/// Body of `PUT /v2/accounts/phone_number_discoverability`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PhoneNumberDiscoverability {
+    discoverable_by_phone_number: bool,
 }
 
 impl SignalWebSocket<websocket::Identified> {
@@ -201,6 +219,30 @@ impl SignalWebSocket<websocket::Identified> {
             .await?
             .service_error_for_status()
             .await?;
+
+        Ok(())
+    }
+
+    /// Set whether the account can be found by its phone number.
+    ///
+    /// Any device may call this, as Signal-Desktop does from its privacy
+    /// settings. It changes nothing else on the account, so a linked device
+    /// can use it where `set_account_attributes` would overwrite the
+    /// primary's registration lock and access key.
+    pub async fn set_phone_number_discoverability(
+        &mut self,
+        discoverable: bool,
+    ) -> Result<(), ServiceError> {
+        self.http_request(
+            Method::PUT,
+            "/v2/accounts/phone_number_discoverability",
+        )?
+        .send_json(&PhoneNumberDiscoverability {
+            discoverable_by_phone_number: discoverable,
+        })
+        .await?
+        .service_error_for_status()
+        .await?;
 
         Ok(())
     }
