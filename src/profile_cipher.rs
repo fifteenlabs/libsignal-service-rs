@@ -273,20 +273,6 @@ impl ProfileCipher {
     ) -> Result<Vec<u8>, ProfileCipherError> {
         self.encrypt(vec![u8::from(sharing)], csprng)
     }
-
-    /// Read a profile's phone-number-sharing flag. Not unpadded, since a
-    /// `0` byte is the value; any non-zero first byte means sharing, as in
-    /// Signal-Android's `decryptBoolean`.
-    pub fn decrypt_phone_number_sharing(
-        &self,
-        bytes: impl AsRef<[u8]>,
-    ) -> Result<bool, ProfileCipherError> {
-        let plaintext = self.decrypt_field(bytes.as_ref())?;
-        let first = plaintext
-            .first()
-            .ok_or(ProfileCipherError::EncryptionError)?;
-        Ok(*first != 0)
-    }
 }
 
 #[cfg(test)]
@@ -397,8 +383,8 @@ mod tests {
             // The only size Signal-Server takes for the field besides empty.
             assert_eq!(encrypted.len(), 29);
             assert_eq!(
-                cipher.decrypt_phone_number_sharing(&encrypted).unwrap(),
-                sharing
+                cipher.decrypt_field(&encrypted).unwrap(),
+                [u8::from(sharing)]
             );
         }
     }
@@ -408,7 +394,6 @@ mod tests {
         let mut rng = rand::rng();
         let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
 
-        assert!(cipher.decrypt_phone_number_sharing([0u8; 5]).is_err());
         assert!(cipher.decrypt_about([0u8; 11]).is_err());
     }
 }

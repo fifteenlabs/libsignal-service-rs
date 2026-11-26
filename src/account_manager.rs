@@ -767,7 +767,6 @@ impl AccountManager {
         current.phone_number_sharing =
             Some(profile_cipher.encrypt_phone_number_sharing(sharing, csprng)?);
 
-        let profile_key = profile_cipher.into_inner();
         self.websocket
             .write_profile(
                 &profile_key.get_profile_key_version(aci),
@@ -1237,12 +1236,12 @@ mod tests {
         let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
 
         for field in [None, Some(Vec::new())] {
-            let written = kept_or_encrypted_empty(field, || {
+            let written = kept_or_encrypted_empty(field.clone(), || {
                 cipher.encrypt_about(String::new(), &mut rng)
             })
             .unwrap();
             assert_eq!(cipher.decrypt_about(&written).unwrap(), "");
-            let written = kept_or_encrypted_empty(None, || {
+            let written = kept_or_encrypted_empty(field, || {
                 cipher.encrypt_emoji(String::new(), &mut rng)
             })
             .unwrap();
