@@ -722,7 +722,9 @@ impl AccountManager {
     /// The flag tells contacts' clients whether to show our number. Every
     /// other field goes back as the server holds it, still encrypted, so
     /// nothing has to be decrypted to write it: name, about, emoji, payment
-    /// address, and the avatar, which is kept.
+    /// address, and the avatar, which is kept. An about or emoji the profile
+    /// lacks goes back as the encryption of nothing, as
+    /// [`upload_versioned_profile`](Self::upload_versioned_profile) writes it.
     ///
     /// Panics if no `profile_key` was set.
     pub async fn set_phone_number_sharing<R: Rng + CryptoRng>(
@@ -743,9 +745,17 @@ impl AccountManager {
         let name = current
             .name
             .take()
+            .filter(|name| !name.is_empty())
             .ok_or(ProfileManagerError::NamelessProfile)?;
-        let about = current.about.take().unwrap_or_default();
-        let about_emoji = current.about_emoji.take().unwrap_or_default();
+
+        let profile_cipher = ProfileCipher::new(profile_key);
+        let about = kept_or_encrypted_empty(current.about.take(), || {
+            profile_cipher.encrypt_about(String::new(), csprng)
+        })?;
+        let about_emoji =
+            kept_or_encrypted_empty(current.about_emoji.take(), || {
+                profile_cipher.encrypt_emoji(String::new(), csprng)
+            })?;
 
         // Signal-Desktop's `keepAvatar` also says "no avatar" when there is none.
         let avatar = if current.avatar.is_some() {
@@ -754,7 +764,6 @@ impl AccountManager {
             AvatarWrite::NoAvatar
         };
 
-        let profile_cipher = ProfileCipher::new(profile_key);
         current.phone_number_sharing =
             Some(profile_cipher.encrypt_phone_number_sharing(sharing, csprng)?);
 
@@ -1195,13 +1204,57 @@ pub fn decrypt_device_name(
     }
 }
 
+/// A profile field to write back as the server returned it, or `empty`'s
+/// ciphertext when it holds nothing.
+///
+/// The server stores a field as it was sent, and zero bytes are no
+/// ciphertext: a reader that splits the 12-byte nonce off without checking the
+/// length panics on them, as this crate did before `decrypt_field`.
+fn kept_or_encrypted_empty(
+    field: Option<Vec<u8>>,
+    empty: impl FnOnce() -> Result<Vec<u8>, ProfileCipherError>,
+) -> Result<Vec<u8>, ProfileCipherError> {
+    match field {
+        Some(bytes) if !bytes.is_empty() => Ok(bytes),
+        _ => empty(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::profile_cipher::ProfileCipher;
     use crate::utils::BASE64_RELAXED;
     use base64::Engine;
     use libsignal_protocol::{IdentityKeyPair, PrivateKey, PublicKey};
+    use rand::Rng;
+    use zkgroup::profiles::ProfileKey;
 
-    use super::DeviceName;
+    use super::{kept_or_encrypted_empty, DeviceName};
+
+    #[test]
+    fn a_missing_or_empty_field_goes_back_as_the_ciphertext_of_nothing() {
+        let mut rng = rand::rng();
+        let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
+
+        for field in [None, Some(Vec::new())] {
+            let written = kept_or_encrypted_empty(field, || {
+                cipher.encrypt_about(String::new(), &mut rng)
+            })
+            .unwrap();
+            assert_eq!(cipher.decrypt_about(&written).unwrap(), "");
+            let written = kept_or_encrypted_empty(None, || {
+                cipher.encrypt_emoji(String::new(), &mut rng)
+            })
+            .unwrap();
+            assert_eq!(cipher.decrypt_emoji(&written).unwrap(), "");
+        }
+
+        let about = cipher.encrypt_about("hi".into(), &mut rng).unwrap();
+        let kept =
+            kept_or_encrypted_empty(Some(about.clone()), || unreachable!())
+                .unwrap();
+        assert_eq!(kept, about);
+    }
 
     #[test]
     fn encrypt_device_name() -> anyhow::Result<()> {
