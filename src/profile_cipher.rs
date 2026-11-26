@@ -148,24 +148,27 @@ impl ProfileCipher {
         Ok(plaintext)
     }
 
+    /// Decrypt a profile's name, about and emoji.
+    ///
+    /// The server stores each field as it was sent and hands an empty one
+    /// back as an empty string. That is no ciphertext at all, so it reads as
+    /// absent, as on Signal-Desktop, rather than failing the whole profile.
     pub fn decrypt(
         &self,
         encrypted_profile: SignalServiceProfile,
     ) -> Result<Profile, ProfileCipherError> {
-        let name = encrypted_profile
-            .name
-            .as_ref()
+        fn present(field: &Option<Vec<u8>>) -> Option<&Vec<u8>> {
+            field.as_ref().filter(|bytes| !bytes.is_empty())
+        }
+
+        let name = present(&encrypted_profile.name)
             .map(|data| self.decrypt_name(data))
             .transpose()?
             .flatten();
-        let about = encrypted_profile
-            .about
-            .as_ref()
+        let about = present(&encrypted_profile.about)
             .map(|data| self.decrypt_about(data))
             .transpose()?;
-        let about_emoji = encrypted_profile
-            .about_emoji
-            .as_ref()
+        let about_emoji = present(&encrypted_profile.about_emoji)
             .map(|data| self.decrypt_emoji(data))
             .transpose()?;
 
@@ -395,5 +398,36 @@ mod tests {
         let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
 
         assert!(cipher.decrypt_about([0u8; 11]).is_err());
+    }
+
+    #[test]
+    fn an_empty_about_or_emoji_reads_as_absent_and_keeps_the_name() {
+        use base64::prelude::*;
+
+        let mut rng = rand::rng();
+        let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
+        let name = cipher
+            .encrypt_name(
+                ProfileName::<&str> {
+                    given_name: "Alice",
+                    family_name: None,
+                },
+                &mut rng,
+            )
+            .unwrap();
+        let profile: SignalServiceProfile =
+            serde_json::from_value(serde_json::json!({
+                "name": BASE64_STANDARD.encode(name),
+                "about": "",
+                "aboutEmoji": "",
+                "capabilities": {},
+            }))
+            .unwrap();
+
+        let profile = cipher.decrypt(profile).unwrap();
+
+        assert_eq!(profile.name.unwrap().given_name, "Alice");
+        assert_eq!(profile.about, None);
+        assert_eq!(profile.about_emoji, None);
     }
 }
