@@ -91,6 +91,8 @@ pub enum ProfileManagerError {
     MissingAvatarUploadForm,
     #[error("uploading the avatar failed: {0}")]
     AvatarUpload(#[source] Box<ServiceError>),
+    #[error("the profile has no name to write back")]
+    NamelessProfile,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -703,6 +705,82 @@ impl AccountManager {
         self.websocket.set_account_attributes(attributes).await
     }
 
+    /// Set whether the account can be found by its phone number. Safe from a
+    /// linked device: see [`SignalWebSocket::set_phone_number_discoverability`].
+    pub async fn set_phone_number_discoverability(
+        &mut self,
+        discoverable: bool,
+    ) -> Result<(), ServiceError> {
+        self.websocket
+            .set_phone_number_discoverability(discoverable)
+            .await
+    }
+
+    /// Rewrite our profile with only its phone-number-sharing flag changed,
+    /// as Signal-Desktop does when "Who can see my number" changes.
+    ///
+    /// The flag tells contacts' clients whether to show our number. Every
+    /// other field goes back as the server holds it, still encrypted, so
+    /// nothing has to be decrypted to write it: name, about, emoji, payment
+    /// address, and the avatar, which is kept. An about or emoji the profile
+    /// lacks goes back as the encryption of nothing, as
+    /// [`upload_versioned_profile`](Self::upload_versioned_profile) writes it.
+    ///
+    /// Panics if no `profile_key` was set.
+    pub async fn set_phone_number_sharing<R: Rng + CryptoRng>(
+        &mut self,
+        aci: Aci,
+        sharing: bool,
+        csprng: &mut R,
+    ) -> Result<(), ProfileManagerError> {
+        let profile_key =
+            self.profile_key.expect("set profile key in AccountManager");
+
+        let mut current = self
+            .websocket
+            .retrieve_profile_by_id(aci, Some(profile_key))
+            .await?;
+        // The server takes no profile without a name, and a write is the
+        // whole profile: there is nothing to keep when the version holds none.
+        let name = current
+            .name
+            .take()
+            .filter(|name| !name.is_empty())
+            .ok_or(ProfileManagerError::NamelessProfile)?;
+
+        let profile_cipher = ProfileCipher::new(profile_key);
+        let about = kept_or_encrypted_empty(current.about.take(), || {
+            profile_cipher.encrypt_about(String::new(), csprng)
+        })?;
+        let about_emoji =
+            kept_or_encrypted_empty(current.about_emoji.take(), || {
+                profile_cipher.encrypt_emoji(String::new(), csprng)
+            })?;
+
+        // Signal-Desktop's `keepAvatar` also says "no avatar" when there is none.
+        let avatar = if current.avatar.is_some() {
+            AvatarWrite::RetainAvatar
+        } else {
+            AvatarWrite::NoAvatar
+        };
+
+        current.phone_number_sharing =
+            Some(profile_cipher.encrypt_phone_number_sharing(sharing, csprng)?);
+
+        self.websocket
+            .write_profile(
+                &profile_key.get_profile_key_version(aci),
+                &name,
+                &about,
+                &about_emoji,
+                Some(&current),
+                &profile_key.get_commitment(aci),
+                &avatar,
+            )
+            .await?;
+        Ok(())
+    }
+
     /// Replace this device's capabilities, as Signal-Desktop does after linking:
     /// <https://github.com/signalapp/Signal-Desktop/blob/main/ts/background.preload.ts>
     /// (`registerCapabilities`).
@@ -1125,13 +1203,57 @@ pub fn decrypt_device_name(
     }
 }
 
+/// A profile field to write back as the server returned it, or `empty`'s
+/// ciphertext when it holds nothing.
+///
+/// The server stores a field as it was sent, and zero bytes are no
+/// ciphertext: a reader that splits the 12-byte nonce off without checking the
+/// length panics on them, as this crate did before `decrypt_field`.
+fn kept_or_encrypted_empty(
+    field: Option<Vec<u8>>,
+    empty: impl FnOnce() -> Result<Vec<u8>, ProfileCipherError>,
+) -> Result<Vec<u8>, ProfileCipherError> {
+    match field {
+        Some(bytes) if !bytes.is_empty() => Ok(bytes),
+        _ => empty(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::profile_cipher::ProfileCipher;
     use crate::utils::BASE64_RELAXED;
     use base64::Engine;
     use libsignal_protocol::{IdentityKeyPair, PrivateKey, PublicKey};
+    use rand::Rng;
+    use zkgroup::profiles::ProfileKey;
 
-    use super::DeviceName;
+    use super::{kept_or_encrypted_empty, DeviceName};
+
+    #[test]
+    fn a_missing_or_empty_field_goes_back_as_the_ciphertext_of_nothing() {
+        let mut rng = rand::rng();
+        let cipher = ProfileCipher::new(ProfileKey::generate(rng.random()));
+
+        for field in [None, Some(Vec::new())] {
+            let written = kept_or_encrypted_empty(field.clone(), || {
+                cipher.encrypt_about(String::new(), &mut rng)
+            })
+            .unwrap();
+            assert_eq!(cipher.decrypt_about(&written).unwrap(), "");
+            let written = kept_or_encrypted_empty(field, || {
+                cipher.encrypt_emoji(String::new(), &mut rng)
+            })
+            .unwrap();
+            assert_eq!(cipher.decrypt_emoji(&written).unwrap(), "");
+        }
+
+        let about = cipher.encrypt_about("hi".into(), &mut rng).unwrap();
+        let kept =
+            kept_or_encrypted_empty(Some(about.clone()), || unreachable!())
+                .unwrap();
+        assert_eq!(kept, about);
+    }
 
     #[test]
     fn encrypt_device_name() -> anyhow::Result<()> {
