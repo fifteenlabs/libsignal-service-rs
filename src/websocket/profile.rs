@@ -115,8 +115,8 @@ impl SignalWebSocket<websocket::Identified> {
         profile_key: Option<zkgroup::profiles::ProfileKey>,
     ) -> Result<SignalServiceProfile, ServiceError> {
         let path = if let Some(key) = profile_key {
-            let version = key.get_profile_key_version(address);
-            let version: &str = version.as_ref();
+            let version =
+                hex::encode(key.get_profile_key_version(address).bytes);
             format!("/v1/profile/{}/{}", address.service_id_string(), version)
         } else {
             format!("/v1/profile/{}", address.service_id_string())
@@ -166,10 +166,10 @@ impl SignalWebSocket<websocket::Identified> {
         commitment: &ProfileKeyCommitment,
         avatar: &AvatarWrite<Vec<u8>>,
     ) -> Result<Option<AttachmentV2UploadAttributes>, ServiceError> {
-        let version: &str = version.as_ref();
+        let version = hex::encode(version.bytes);
         let commitment = bincode::serialize(commitment)?;
         let command = profile_write(
-            version,
+            &version,
             name,
             about,
             emoji,
@@ -224,9 +224,8 @@ fn profile_write<'s>(
 fn profile_key_credential_path(request: &ProfileCredentialRequest) -> String {
     let aci = request.aci();
 
-    // Bind before borrowing: `as_ref` would borrow a temporary.
-    let version = request.profile_key().get_profile_key_version(aci);
-    let version: &str = version.as_ref();
+    let version =
+        hex::encode(request.profile_key().get_profile_key_version(aci).bytes);
 
     let request_hex = request.hex();
     format!(
